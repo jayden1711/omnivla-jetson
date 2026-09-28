@@ -2,7 +2,8 @@
 # STUDY: limit (bit-width sweep) | tests (real-driving tests, incl. blind controls) | sens (per-component 2-bit
 # sensitivity) | teacher (bf16 labels on held-out samples) | lora (low-bit + rank-16 correction) | wanda (2:4 pruning) |
 # exq (GPTQ/ActQuant calibration and step weighting) | a8 (simulated activation quantization) | gptqx (GPTQ int4 export
-# for Marlin, used by build/kaggle_build.py). Output: /kaggle/working/compress_<STUDY>.npz, keys "<cfg>__m<mode>__<frame>".
+# for Marlin, used by build/kaggle_build.py) | lang (CAST language-goal test, eval/data/cast_extract.py).
+# Output: /kaggle/working/compress_<STUDY>.npz, keys "<cfg>__m<mode>__<frame>".
 import gc, glob, json, math, os, shutil, sys, tarfile, time
 import numpy as np
 import torch
@@ -66,8 +67,31 @@ if tz:
         "pose20": dict(mode=4, frames=[f for f in rel[rel.far_ok].frame if f in GOAL20], goal=lambda f: GOAL20[f], gimg=None),
         "img3m": dict(mode=6, frames=[f for f in rel[rel.img_ok].frame], goal=None, gimg=lambda f: f"{gdir[0]}/{f}.jpg"),
     }
+    cz = glob.glob("/kaggle/input/**/cast_lang.npz", recursive=True)
+    if cz:                                             # language goal (CAST); image resized as OmniVLA's CAST loader does
+        CZ = np.load(cz[0]); CM = json.loads(str(CZ["meta"]))
+        TESTS["lang"] = dict(mode=7, frames=sorted(CM), goal=None, gimg=None,
+                             img=lambda k: Image.fromarray(CZ[f"img__{k}"]).resize((224, 224)),
+                             shuf={k: v["img_shuffle"] for k, v in CM.items()}, lang=lambda k: CM[k]["instruction"],
+                             lshuf={k: v["lang_shuffle"] for k, v in CM.items()})
+    lz = glob.glob("/kaggle/input/**/lelan_lang.npz", recursive=True)
+    if lz:                                             # object goal (LeLaN); lang_shuffled = the other object's prompt
+        LZ = np.load(lz[0]); LM = json.loads(str(LZ["meta"]))
+        TESTS["lelan"] = dict(mode=7, frames=sorted(LM), goal=None, gimg=None, img=lambda k: Image.fromarray(LZ[f"img__{k}"]),
+                              shuf={k: v["img_shuffle"] for k, v in LM.items()}, lang=lambda k: "move toward " + LM[k]["target"],
+                              lang_alt=lambda k: "move toward " + LM[k]["distractor"])
+    sz = glob.glob("/kaggle/input/**/seq_demo.npz", recursive=True)
+    if sz:                                             # image goal on the sequential demo clips (every 21st frame)
+        SZ = np.load(sz[0]); SM = json.loads(str(SZ["meta"]))
+        TESTS["seq"] = dict(mode=6, frames=sorted(SM), goal=None, gimg=None, img=lambda k: Image.fromarray(SZ[f"img__{k}"]),
+                            gimg_arr=lambda k: Image.fromarray(SZ[f"goal__{SM[k]}"]))
     if os.environ.get("TESTS_ONLY"):
-        TESTS = {k: v for k, v in TESTS.items() if k in os.environ["TESTS_ONLY"].split(",")}
+        want = os.environ["TESTS_ONLY"].split(",")
+        missing = [t for t in want if not TESTS.get(t, {}).get("frames")]
+        if missing:                                    # a missing input file must not turn into an empty, "passing" test
+            raise SystemExit(f"[C] TESTS_ONLY: no frames for {missing} (available: "
+                             f"{ {k: len(v['frames']) for k, v in TESTS.items()} }); is the input dataset attached?")
+        TESTS = {k: v for k, v in TESTS.items() if k in want}
     print("[C] tests:", {k: len(v["frames"]) for k, v in TESTS.items()}, flush=True)
 SMOKE = os.environ.get("SMOKE") == "1"
 if SMOKE:                                              # quick integration test: 3 pose frames, 2 verify frames
@@ -267,12 +291,18 @@ def step_weights(kind, mode):
     return w / w.mean()
 
 PRUNE = os.environ.get("PRUNE", "")
-def apply_prune(vla, ns):
-    """deployed uniform-grid pruning of current-image tokens on top of elision"""
-    if not PRUNE:
+def apply_prune(vla, ns, spec=None):
+    """deployed uniform-grid pruning of current-image tokens on top of elision. spec: "spatial<pct>", "none" (back to
+    elision only; used to change the pruning after GPTQ, EVAL_PRUNES) or None (= the PRUNE setting)"""
+    spec = PRUNE if spec is None else spec
+    if spec == "none":
+        vla._build_multimodal_attention_MMN = ns["build_elide"]; vla.language_model.forward = ns["lm_fwd"]
+        print("[C] pruning: off (elision only)", flush=True)
         return
-    assert PRUNE.startswith("spatial"), PRUNE
-    frac, N_IMG = int(PRUNE[7:]) / 100.0, 256
+    if not spec:
+        return
+    assert spec.startswith("spatial"), spec
+    frac, N_IMG = int(spec[7:]) / 100.0, 256
     n_keep = N_IMG - int(round(N_IMG * frac))
     drop = np.setdiff1d(np.arange(N_IMG), np.unique(np.round(np.linspace(0, N_IMG - 1, n_keep)).astype(int))) + 1
     ST = {}
@@ -721,11 +751,19 @@ def run(cfg):
             MODE["id"] = m; E["on"] = True; E["skip_img"] = m != 6      # mode 6 keeps the goal image (elision drops only the pose token)
             SEL["set"] = {4: 0, 6: 1}.get(m, 0) if cfg.get("lora", {}).get("per_modality") else 0
             for variant in cfg.get("blind", [None]):
+                if variant is not None and (variant == "lang_shuffled" and "lang" not in T or
+                                            os.environ.get("BLIND_TESTS") and tname not in os.environ["BLIND_TESTS"].split(",")):
+                    continue
                 for i, f in enumerate(T["frames"][: 3 if SMOKE else None]):
-                    src = f if variant != "shuffled" else smap[f]
-                    CUR["img"] = BLACK if variant == "blank" else Image.open(f"./frames/{src}.jpg").convert("RGB")
+                    src = f if variant != "shuffled" else (T["shuf"][f] if "shuf" in T else smap[f])
+                    CUR["img"] = BLACK if variant == "blank" else (T["img"](src) if "img" in T else Image.open(f"./frames/{src}.jpg").convert("RGB"))
                     CUR["goal"] = T["goal"](f) if T["goal"] else None
-                    CUR["gimg"] = Image.open(T["gimg"](f)).convert("RGB") if T["gimg"] else None
+                    CUR["gimg"] = Image.open(T["gimg"](f)).convert("RGB") if T["gimg"] else (T["gimg_arr"](f) if "gimg_arr" in T else None)
+                    if "lang" in T:                                           # instruction (another sample's for lang_shuffled)
+                        if variant == "lang_shuffled" and "lang_alt" in T:
+                            inf.lan_inst_prompt = T["lang_alt"](f)            # same image, the other object's prompt
+                        else:
+                            inf.lan_inst_prompt = T["lang"](T["lshuf"][f] if variant == "lang_shuffled" else f)
                     if i == 0:
                         inf.run_omnivla()                                     # warm-up (shape change)
                     inf.run_omnivla()
@@ -805,9 +843,16 @@ def run(cfg):
         json.dump(man, open("/kaggle/working/prequant_marpcg_manifest.json", "w"), indent=1)
         print(f"[G] exported {len(out)} Marlin layers | files {man['files']}", flush=True)
         del out
-        lat.clear(); eval_tests("gptqx_pc4")
-        res["meta__gptqx_pc4"] = np.array(json.dumps(dict(name="gptqx_pc4", t4_latency_s=float(np.mean(lat)), prune=PRUNE)))
-        np.savez(OUT, **res)
+        if os.environ.get("EVAL_PRUNES"):                     # same weights, several pruning levels (ablation)
+            for spec in os.environ["EVAL_PRUNES"].split(","):
+                apply_prune(vla, ns, spec); tag = f"gptqx_pc4_{spec}"
+                lat.clear(); eval_tests(tag)
+                res[f"meta__{tag}"] = np.array(json.dumps(dict(name=tag, t4_latency_s=float(np.mean(lat)), prune=spec, calib_prune=PRUNE)))
+                np.savez(OUT, **res)
+        else:
+            lat.clear(); eval_tests("gptqx_pc4")
+            res["meta__gptqx_pc4"] = np.array(json.dumps(dict(name="gptqx_pc4", t4_latency_s=float(np.mean(lat)), prune=PRUNE)))
+            np.savez(OUT, **res)
         frames_loop = ()
     elif cfg.get("a8"):                                           # study 7: simulated activation quantization
         keys = sorted(HO)[: int(os.environ.get("N_CALIB", "64"))]
@@ -912,8 +957,15 @@ elif STUDY == "exq":                                  # study 6: LLM fp16 fake-q
     if os.environ.get("SUBS_ONLY"):
         SUBS = [x for x in SUBS if f"{x['method']}_{x['kind']}_{x['fmt']}" in os.environ["SUBS_ONLY"].split(",")]
     CONFIGS = [dict(name="exq", base="fp16", llm=None, vis=4, group=G2, exq=SUBS)]
-elif STUDY == "gptqx":                                # GPTQ int4 export (deployment)
+elif STUDY == "gptqx":                                # GPTQ int4 export (deployment); BLIND=none,blank,... adds controls
     CONFIGS = [dict(name="gptqx", base="fp16", llm=None, vis=4, group=G2, gptqx=True)]
+    if os.environ.get("BLIND"):
+        CONFIGS[0]["blind"] = [None if b == "none" else b for b in os.environ["BLIND"].split(",")]
+elif STUDY == "lelan_p75":                            # ablation: fp16 (no quantization) with PRUNE, e.g. spatial75
+    CONFIGS = [dict(name=f"fp16_{PRUNE or 'none'}", base="fp16", tests=True, blind=[None, "blank", "shuffled", "lang_shuffled"])]
+elif STUDY in ("lang", "lelan"):                      # language tests: fp16 with blind controls, bf16 reference
+    CONFIGS = [dict(name="fp16", base="fp16", tests=True, blind=[None, "blank", "shuffled", "lang_shuffled"]),
+               dict(name="bf16", base="bf16", tests=True)]
 elif STUDY == "a8":                                   # study 7: W4A8 / W8A8, per-token dynamic int8 activations
     A8 = [dict(kind="none"), dict(kind="plain"), dict(kind="smooth", alpha=0.85), dict(kind="rot"), dict(kind="qoq", alpha=0.5),
           dict(kind="plain", excl="L0-3"), dict(kind="plain", excl="top0.13"), dict(kind="rot", excl="L0-3"),

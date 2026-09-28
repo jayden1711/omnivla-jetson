@@ -1,7 +1,9 @@
 """OmniVLA-7B runtime for the Jetson Orin Nano 8 GB.
 
 LLM: per-channel int4 on Marlin (groupsize=-1; grouped Marlin is wrong on sm_87). Vision: HQQ 4-bit on GemLite, SigLIP
-MLP (width 4304) on HQQ's portable backend. Modality elision + uniform-grid pruning of 75% of the current-image tokens.
+MLP (width 4304) on HQQ's portable backend. Modality elision + uniform-grid pruning of 75% of the current-image tokens
+in pose and image-goal modes (4, 6). Language modes (7, 8) run without pruning (lang_prune_frac=0): 75% pruning cut
+object-goal accuracy from 84% to 69% (results/lelan_summary.md), while pose and image goals are unaffected.
 Weights: pre-packed 256 MB shards from build/build_model.sh. Image-goal mode caches the goal's vision features (exact);
 goal K/V reuse (goal_refresh > 1) is an approximation because OmniVLA's LLM attention is bidirectional.
 
@@ -26,7 +28,7 @@ def _grid_keep(n):
 
 class OmniVLADeploy:
     def __init__(self, deploy_dir, repo=DEFAULT_REPO, prune_frac=0.75, verbose=True, trim_every=20, goal_refresh=GOAL_REFRESH,
-                 vit_trunc=True):
+                 vit_trunc=True, lang_prune_frac=0.0):
         t0 = time.time()
         self.dir, self.log = deploy_dir, (print if verbose else (lambda *a, **k: None))
         if repo not in sys.path:
@@ -139,7 +141,7 @@ class OmniVLADeploy:
         self.action_tokenizer = R.ActionTokenizer(self.processor.tokenizer)
         self.vla = vla.eval()
         self.goal_refresh = max(1, int(goal_refresh))
-        self._install_token_hooks(prune_frac)
+        self._install_token_hooks(prune_frac, lang_prune_frac)
         if vit_trunc:
             self._install_vit_trunc()
         self._inf = R.Inference(save_dir="/tmp", lan_inst_prompt="", goal_utm=(0.0, 0.0), goal_compass=0.0,
@@ -149,7 +151,8 @@ class OmniVLADeploy:
         self._libc, self._trim_every, self._n_pred = libc, int(trim_every), 0
         self.weights_gib = torch.cuda.memory_allocated() / 2**30
         self.log(f"[DEPLOY] ready in {time.time()-t0:.0f} s | layers {counts} (GemLite {n_gl}) | "
-                 f"torch {self.weights_gib:.2f} GiB | pruning grid {int(prune_frac*100)}% (keep {self.n_keep})", flush=True)
+                 f"torch {self.weights_gib:.2f} GiB | pruning grid {int(prune_frac*100)}% (keep {self.n_keep}), "
+                 f"language modes {int(lang_prune_frac*100)}% (keep {self.n_keep_lang})", flush=True)
 
     # ---- ViT truncation, modality elision, grid token pruning, goal cache ----
     def _install_vit_trunc(self):
@@ -162,7 +165,7 @@ class OmniVLADeploy:
                 return x[:, npre:]
             mod.forward = fwd
 
-    def _install_token_hooks(self, frac):
+    def _install_token_hooks(self, frac, lang_frac=0.0):
         vla, S = self.vla, {"skip_img": False}
         self._S = S
         GC = self._GC = dict(mode="off", kv={}, goal_idx=None, key=None, vis_key=None, vis_feat=None, n=0, vis_skip=False)
@@ -196,13 +199,18 @@ class OmniVLADeploy:
         for layer in vla.language_model.model.layers:
             a = layer.self_attn
             a.forward = (lambda orig, att: (lambda *x, **kw: attn_forward(att, orig, *x, **kw)))(a.forward, a)
-        self.n_keep = N_IMG - int(round(N_IMG * frac))
-        drop = torch.as_tensor(np.setdiff1d(np.arange(N_IMG), _grid_keep(self.n_keep)) + 1, device=self.dev) if frac > 0 else None
+        def drop_for(f):
+            n = N_IMG - int(round(N_IMG * f))
+            return n, (torch.as_tensor(np.setdiff1d(np.arange(N_IMG), _grid_keep(n)) + 1, device=self.dev) if f > 0 else None)
+        self.n_keep, self._drop = drop_for(frac)                # pose and image goal (4, 6)
+        self.n_keep_lang, self._drop_lang = drop_for(lang_frac)  # language modes (7, 8)
+        S["drop"] = self._drop
         ob = vla._build_multimodal_attention_MMN
 
         def build(inp, patches, am, aml, mid):
             emb, mask = ob(inp, patches, am, aml, mid)
             keep = mask[0].bool().clone()                      # elision: masked (unused-modality) tokens dropped
+            drop = S["drop"]                                   # set per call by predict (mode-dependent)
             if drop is not None:
                 keep[drop] = False                             # grid pruning of current-image tokens (positions 1..256)
             ids = torch.arange(mask.shape[1], device=mask.device)[keep]
@@ -294,6 +302,7 @@ class OmniVLADeploy:
         batch = self._inf.data_transformer_omnivla(image, lan, gimg, gpose, prompt_builder=R.PurePromptBuilder,
                                                    action_tokenizer=self.action_tokenizer, processor=self.processor)
         self._S["skip_img"] = mode != 6
+        self._S["drop"] = self._drop_lang if mode in (7, 8) else self._drop
         GC = self._GC
         if mode == 6:                                          # goal cache: refresh on goal change and every goal_refresh calls
             key = goal_id if goal_id is not None else hashlib.md5(np.asarray(goal_image).tobytes()).hexdigest()

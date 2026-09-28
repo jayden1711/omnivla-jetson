@@ -46,10 +46,37 @@ included in this repository.
 
 The evaluation uses frames and logs from FrodoBots-2K by FrodoBots Lab
 (https://huggingface.co/datasets/frodobots/FrodoBots-2K), licensed CC BY-SA 4.0
-(https://creativecommons.org/licenses/by-sa/4.0/). No frames or data files are included; `eval/data/extract_frames.py`
+(https://creativecommons.org/licenses/by-sa/4.0/). Apart from the demo media below, no frames or data files are
+included; `eval/data/extract_frames.py`
 and the other `eval/data` scripts download the parts they need. Anything you build from the frames (for example the
 Kaggle dataset made by `build/make_build_dataset.sh`, or the reference images that
 `deploy/tools/fetch_reference_images.py` downloads) must keep the CC BY-SA 4.0 attribution and license.
+
+### Demo media: `docs/media/demo.gif` and `docs/media/demo.mp4` (CC BY-SA 4.0)
+
+These two files are adaptations of FrodoBots-2K video by FrodoBots Lab, licensed CC BY-SA 4.0
+(https://creativecommons.org/licenses/by-sa/4.0/). Changes: three 5-second front-camera clips (rides
+`ride_16557_20240117023647`, `ride_17522_20240128045515` and `ride_38564_20240501100413`) were cut, resized and re-encoded,
+and overlaid with model predictions, the driven path and text by `eval/demo/render_demo.py`. The two files are licensed
+under CC BY-SA 4.0 as well, not MIT. When you share them, keep the attribution: "Contains video from FrodoBots-2K by
+FrodoBots Lab (CC BY-SA 4.0); overlays from omnivla-jetson; licensed CC BY-SA 4.0."
+
+## Data: CAST (no license stated)
+
+The language-goal test uses the CAST dataset (https://huggingface.co/datasets/catglossop/CAST-dataset; paper
+https://arxiv.org/abs/2508.13446), built on the GNM data mixture. Its dataset card states no license, so nothing from it
+is included: `eval/data/cast_extract.py` downloads it when you run it, and `results/` holds only aggregate numbers.
+
+## Data: LeLaN (MIT)
+
+The object-goal language test uses frames and object labels from the LeLaN dataset
+(https://huggingface.co/datasets/NHirose/LeLaN_dataset_NoMaD_traj, MIT per its dataset card). Nothing from it is
+included: `eval/data/lelan_extract.py` downloads the 210 frames it needs, and `results/` holds only aggregate numbers.
+
+## OmniVLA-edge weights and CLIP
+
+`eval/edge/edge_eval.py` uses the OmniVLA-edge checkpoint (https://huggingface.co/NHirose/omnivla-edge, MIT per its model
+card) and OpenAI's CLIP (https://github.com/openai/CLIP, MIT). Neither is included.
 
 ## Other code
 

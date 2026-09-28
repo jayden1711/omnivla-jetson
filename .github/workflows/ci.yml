@@ -1,0 +1,37 @@
+name: ci
+
+# Checks that run without a Jetson, a GPU or model weights: syntax of every Python and shell script, the Python API
+# tests (replayed reference outputs), the rover protocol tests and the mock test of setup_jetson.sh.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install test dependencies
+        run: python -m pip install numpy pillow
+      - name: Python syntax
+        run: python -m compileall -q -x '(^|/)\.' .
+      - name: Shell syntax
+        run: |
+          set -e
+          for f in $(git ls-files '*.sh'); do bash -n "$f" && echo "ok $f"; done
+      - name: ASCII-only text files
+        run: |
+          bad=$(git ls-files '*.py' '*.sh' '*.md' '*.yml' '*.cff' '*.txt' | xargs grep -lP '[^\x00-\x7F]' || true)
+          if [ -n "$bad" ]; then echo "non-ASCII characters in: $bad"; exit 1; fi
+      - name: Python API tests
+        run: python -m unittest discover -s tests -v
+      - name: Rover protocol tests
+        run: cd deploy/ros2 && python test_rover_protocol.py
+      - name: setup_jetson.sh mock test
+        run: bash deploy/tests/setup_mock_test.sh

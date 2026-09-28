@@ -4,7 +4,11 @@
 
 - **LLM:** int4 per-channel on the Marlin kernel, GPTQ-calibrated weights. `OMNIVLA_WEIGHTS=<folder>` selects another weights folder inside `deploy/`.
 - **Vision:** HQQ 4-bit on the GemLite kernel.
-- **Tokens:** modality elision, then uniform-grid pruning of 75% of the current-image tokens.
+- **Tokens:** modality elision, then uniform-grid pruning of 75% of the current-image tokens in pose and image-goal
+  modes. Language modes (7, 8) are not pruned: pruning cut object-goal accuracy from 84% to 69%
+  ([results/lelan_summary.md](../results/lelan_summary.md)). Their latency is therefore higher, about 750 ms instead
+  of about 430 ms (estimated from pose-mode measurements without pruning; not yet measured in language mode).
+  `OmniVLADeploy(..., lang_prune_frac=0.5)` trades some accuracy for speed (81% on the same test, not significantly below 84%).
 - **Image goal:** the goal image's vision features are computed once per goal (exact). Reusing the goal tokens' keys/values
   as well is **off by default** (`goal_refresh=1`): OmniVLA's attention is bidirectional, so those keys/values depend on the
   current frame and reuse is an approximation that measurably costs about +0.02 driving error. Opt in with
@@ -180,6 +184,20 @@ Modes:
 | 8 | language + pose | `lang` and `goal_pose` |
 
 Only modes 4 and 6 were validated on the Jetson.
+
+The `omnivla_jetson` package in the repo root wraps the same runtime (use it from a checkout of this repo, where
+`setup_jetson.sh` puts the weights in `deploy/weights`). It picks the mode from the goals you pass,
+accepts PIL images, numpy arrays or file paths, and returns the command with the waypoints. Its outputs are the
+runtime's, unchanged (`tools/api_check.py` checks this on the Jetson against the reference outputs):
+```python
+from omnivla_jetson import OmniVLAJetson
+m = OmniVLAJetson("deploy/weights")                                          # path from the repo root
+p = m.predict(img, goal_pose=OmniVLAJetson.goal_pose_from_xy_yaw(3.0, 0.0))   # or goal_image=..., instruction=...
+p.waypoints, p.linear, p.angular
+```
+`examples/` has one script per mode (`./launch.sh ../examples/pose_goal.py frame.jpg 3 0`).
+
+If something fails, see [troubleshooting.md](troubleshooting.md).
 
 ## Troupe rover integration (ROS 2)
 There is no velocity topic on the rover. The Troupe drivers send `servo_cmd_t` UDP packets to `servo_daemon` on the BeagleBone (192.168.7.2:5005), and that address is reachable from the Pi's USB link.
