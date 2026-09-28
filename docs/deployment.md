@@ -63,11 +63,12 @@ deploy/
    script; Kaggle's torch version is recorded in the manifest.
 2. **Set up the Jetson** (on a fresh Orin Nano 8 GB with JetPack 6.2, from this folder):
    ```
-   ./setup_jetson.sh --weights-src <copy of build/out/weights>
+   ./setup_jetson.sh                                       # weights from Hugging Face
+   ./setup_jetson.sh --weights-src <copy of build/out/weights>   # or your own build
    ```
    Checks the NVMe mount, asks before each system change (MAXN SUPER, headless boot, 16 GB swap, page-cache helper,
    sudoers entries), builds the venv (Jetson torch 2.8.0 wheel + `constraints.txt`, transformers fork, pinned
-   packages, Marlin from source), clones OmniVLA @5182600 and applies `patches/omnivla.patch`, copies and verifies the
+   packages, Marlin from source), clones OmniVLA @5182600 and applies `patches/omnivla.patch`, downloads (or copies) and verifies the
    weights, and ends with `tools/reference_check.py`: 10 reference frames x 2 modes must match the validated
    deployment bit-exactly. Safe to rerun (every step checks first). `--no-system` never changes system settings,
    `--yes` accepts all, `--yes-runtime` only the non-persistent ones (stopping services, max clocks during the check).
@@ -150,7 +151,8 @@ The exact validated environment is recorded in `tools/deploy_venv_freeze.txt`.
 OmniVLA **must** use the OpenVLA-OFT transformers fork. Stock `transformers` silently runs causal attention, which gives actions about 1 unit off.
 
 ### 6. Weights
-**Option A: copy the pre-built `weights/` folder** (3.9 GB) from a machine that has it, then verify it:
+**Option A: the pre-built weights on Hugging Face** (https://huggingface.co/jayden1711/omnivla-7b-jetson-int4). `setup_jetson.sh` downloads them by default (log in
+first with `hf auth login` if the repo is private). To do it by hand, or to check a copy:
 ```
 cd /mnt/nvme/omnivla/deploy/weights && sha256sum -c SHA256SUMS      # every line must say OK
 ```

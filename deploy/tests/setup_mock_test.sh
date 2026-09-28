@@ -20,7 +20,9 @@ stub findmnt 'echo /dev/nvme0n1p1'
 stub df 'printf "Avail\n 120G\n"'
 stub nvpmodel "cat $S/pm"
 stub python3.10 'if [ "$1" = -m ] && [ "$2" = venv ]; then mkdir -p "$3/bin"; cp '"$T"'/bin/fakepy "$3/bin/python"; fi'
-stub fakepy "echo \"py \$*\" >> $S/py.log; exit 0"
+stub fakepy "echo \"py \$*\" >> $S/py.log
+case \"\$1\" in *download_weights.py) [ -d $S/hfsrc ] || exit 1; mkdir -p \"\$4\"; cp -R $S/hfsrc/. \"\$4\"/;; esac
+exit 0"
 stub systemctl "case \"\$1\" in get-default) cat $S/default;; set-default) echo \$2 > $S/default;; esac"
 stub swapon "if [ \"\$1\" = --show=NAME ]; then cat $S/swap; else echo \$1 > $S/swap; fi"
 stub fallocate "touch \"\${@: -1}\""; stub mkswap "true"; stub chmod "true"
@@ -86,5 +88,11 @@ mkstate; run --no-system --weights-src "$T/wsrc"
 check "check not run, reported" "grep -q 'correctness check: NOT RUN' $S/out.log && ! [ -f $S/launch.log ]"
 mkstate; run --no-system --yes-runtime --weights-src "$T/wsrc"
 check "--yes-runtime runs the check without persistent changes" "grep -q 'correctness check: PASS' $S/out.log && [ \$(cat $S/default) = graphical.target ]"
+echo "[T8] default: weights downloaded from Hugging Face"
+mkstate; mkweights "$S/hfsrc"; run --no-system --yes-runtime
+check "downloaded, verified, check PASS" "[ \$(cat $S/rc) = 0 ] && grep -q 'weights/ downloaded and verified' $S/out.log && grep -q 'download_weights.py jayden1711/omnivla-7b-jetson-int4 ' $S/py.log"
+echo "[T9] corrupted Hugging Face download"
+mkstate; mkweights "$S/hfsrc"; echo tampered >> "$S/hfsrc/base.safetensors"; run --no-system --yes-runtime
+check "rejected, nothing installed, partial download removed" "[ \$(cat $S/rc) != 0 ] && grep -q 'downloaded weights fail SHA256SUMS' $S/out.log && [ ! -e $T/deploy/weights ] && [ ! -e $T/deploy/weights.incoming ]"
 echo "[mock] $PASS passed, $FAILN failed"
 [ $FAILN = 0 ]

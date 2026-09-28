@@ -25,14 +25,15 @@ The driving error of this repo's config is not significantly different from NF4 
 
 - Jetson Orin Nano 8 GB with an NVMe SSD, JetPack 6.2 (CUDA 12.6, Python 3.10), booted without the desktop.
 - To build the weights: a Kaggle account with GPU access, the `kaggle` CLI, ffmpeg and the packages in
-  `eval/requirements-eval.txt` (the dataset step downloads a few GB of FrodoBots-2K). Or download the pre-built weights from
-  Hugging Face: `<HF link coming soon>`.
+  `eval/requirements-eval.txt` (the dataset step downloads a few GB of FrodoBots-2K). Not needed if you use the pre-built
+  weights on Hugging Face: [huggingface.co/jayden1711/omnivla-7b-jetson-int4](https://huggingface.co/jayden1711/omnivla-7b-jetson-int4).
 - ffmpeg on the Jetson for the one-time reference-image download (or copy the images from a PC).
 - OmniVLA itself is not included. The setup script clones it at commit `5182600` and applies a one-line patch.
 
 ## Setup
 
-Skip the first two commands if you use the pre-built weights.
+Skip the first two commands if you use the pre-built weights: without `--weights-src`, `setup_jetson.sh` downloads
+them from Hugging Face (`--hf-repo` / `--hf-revision` to override) and checks `SHA256SUMS`.
 
 ```
 KAGGLE_USER=<you> ./build/make_build_dataset.sh             # on a PC, once: your private Kaggle dataset (no GPU)

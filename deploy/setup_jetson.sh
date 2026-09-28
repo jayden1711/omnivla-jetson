@@ -1,24 +1,28 @@
 #!/bin/bash
 # setup_jetson.sh - set up a fresh Jetson Orin Nano 8 GB (JetPack 6.2) to run the deployed OmniVLA.
 #
-#   ./setup_jetson.sh [--weights-src DIR|HOST:DIR] [--root DIR] [--venv DIR] [--repo DIR] [--no-system | --yes] [--yes-runtime]
+#   ./setup_jetson.sh [--weights-src DIR|HOST:DIR] [--hf-repo ID] [--hf-revision REV] [--root DIR] [--venv DIR] [--repo DIR]
+#                     [--no-system | --yes] [--yes-runtime]
 #
 # Run from this deploy/ folder on the Jetson. Safe to rerun: every step checks first.
 # Persistent system changes (power mode, boot target, swap + fstab, page-cache helper, sudoers) are made only after
 # asking; --no-system never makes them, --yes accepts all. Runtime-only changes (stopping services, max clocks during
 # the correctness check) are asked separately; --yes-runtime accepts them.
 # Steps: 1 preflight, 2 system settings, 3 venv (Jetson torch 2.8.0, transformers fork, pinned packages, Marlin for
-# sm_87), 4 OmniVLA @5182600 + patches/omnivla.patch, 5 weights (copy + SHA256SUMS), 6 correctness check
+# sm_87), 4 OmniVLA @5182600 + patches/omnivla.patch, 5 weights (download from Hugging Face, or copy from --weights-src;
+# then SHA256SUMS), 6 correctness check
 # (tools/reference_check.py: 10 frames x 2 modes must match the reference outputs bit-exactly).
 set -uo pipefail
 DEPLOY="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ROOT=/mnt/nvme/omnivla; VENV=""; REPO=""; WSRC=""; MODE=ask; RT=ask
+HF_REPO="${OMNIVLA_HF_REPO:-jayden1711/omnivla-7b-jetson-int4}"; HF_REV="${OMNIVLA_HF_REVISION:-81cc6dc43e067e33d08230f0434d4b9afe480666}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT="$2"; shift 2;; --venv) VENV="$2"; shift 2;; --repo) REPO="$2"; shift 2;;
     --weights-src) WSRC="$2"; shift 2;; --no-system) MODE=no; shift;; --yes) MODE=yes; RT=yes; shift;;
     --yes-runtime) RT=yes; shift;;
-    -h|--help) sed -n 2,12p "$0"; exit 0;;
+    --hf-repo) HF_REPO="$2"; shift 2;; --hf-revision) HF_REV="$2"; shift 2;;
+    -h|--help) sed -n 2,14p "$0"; exit 0;;
     *) echo "unknown option $1"; exit 2;;
   esac
 done
@@ -134,12 +138,20 @@ else git -C "$REPO" apply "$DEPLOY/patches/omnivla.patch" && ok "patch applied" 
 verify_weights() { [ -f "$1/SHA256SUMS" ] && (cd "$1" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1); }
 if verify_weights "$DEPLOY/weights"; then ok "weights/ verified ($(wc -l < "$DEPLOY/weights/SHA256SUMS") files)"
 else
-  [ -n "$WSRC" ] || die "weights/ missing or failing SHA256SUMS; pass --weights-src (the folder from build_model.sh)"
-  say "copying weights from $WSRC"
-  rm -rf "$DEPLOY/weights.incoming"; rsync -a "${WSRC%/}/" "$DEPLOY/weights.incoming/" || die "copy"
-  verify_weights "$DEPLOY/weights.incoming" || die "copied weights fail SHA256SUMS"
+  if [ -n "$WSRC" ]; then
+    say "copying weights from $WSRC"
+    rm -rf "$DEPLOY/weights.incoming"; rsync -a "${WSRC%/}/" "$DEPLOY/weights.incoming/" || die "copy"
+    verify_weights "$DEPLOY/weights.incoming" || die "copied weights fail SHA256SUMS"
+    HOW="copied"
+  else
+    say "downloading weights from https://huggingface.co/$HF_REPO (revision $HF_REV, 4.1 GB)"
+    "$PY" "$DEPLOY/tools/download_weights.py" "$HF_REPO" "$HF_REV" "$DEPLOY/weights.incoming" \
+      || die "weights/ missing: download from Hugging Face failed (see above); or pass --weights-src DIR"
+    verify_weights "$DEPLOY/weights.incoming" || { rm -rf "$DEPLOY/weights.incoming"; die "downloaded weights fail SHA256SUMS"; }
+    HOW="downloaded"
+  fi
   [ -e "$DEPLOY/weights" ] && mv "$DEPLOY/weights" "$DEPLOY/weights.old.$(date +%s)"
-  mv "$DEPLOY/weights.incoming" "$DEPLOY/weights"; ok "weights/ copied and verified"
+  mv "$DEPLOY/weights.incoming" "$DEPLOY/weights"; ok "weights/ $HOW and verified"
 fi
 
 # ---------- 6. runtime + correctness check ----------
