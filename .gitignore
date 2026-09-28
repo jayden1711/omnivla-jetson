@@ -1,0 +1,70 @@
+# Weights and checkpoints
+weights/
+weights_*/
+**/weights/
+build/out/
+build/verify_out/
+build/kaggle_*/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+prequant*/
+omnivla-original/
+
+# Virtual environments
+venv/
+.venv/
+venv_*/
+env/
+
+# Datasets, frames, derived data
+data_raw/
+data_frames/
+data_heldout/
+data_seq/
+kaggle_ds/
+kaggle_out*/
+eval/data/gt_src/
+deploy/tests/reference/frames/
+deploy/tests/reference/goals/
+*.npz
+!deploy/tests/reference/reference.npz
+*.jpg
+*.jpeg
+*.ts
+*.zip
+*.tar.gz
+
+# Logs and run outputs
+*.log
+*.out
+results/logs/
+results/jetson_logs/
+results/mf_results/
+results/*.csv
+results/*.json
+mf_results/
+
+# Caches
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
+
+# Secrets and personal config
+.kaggle/
+kaggle.json
+.env
+*.pem
+*.key
+.ssh/
+sudoers*
+
+# Backups
+*.bak
+*.bak[0-9]*
+*_old
+*.orig

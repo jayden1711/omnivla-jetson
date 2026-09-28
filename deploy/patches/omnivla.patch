@@ -1,0 +1,10 @@
+diff --git a/prismatic/vla/__init__.py b/prismatic/vla/__init__.py
+index 5d2af70..e33773c 100644
+--- a/prismatic/vla/__init__.py
++++ b/prismatic/vla/__init__.py
+@@ -1 +1,4 @@
+-from .materialize import get_vla_dataset_and_collator
++try:
++    from .materialize import get_vla_dataset_and_collator
++except ImportError:  # training-only (needs dlimp/tensorflow)
++    get_vla_dataset_and_collator = None

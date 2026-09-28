@@ -1,0 +1,107 @@
+{
+ "source": "FrodoBots-2K (CC BY-SA 4.0, FrodoBots Lab)",
+ "url": "https://frodobots-2k-dataset.s3.ap-southeast-1.amazonaws.com/output_rides_{part}.zip",
+ "decode": "ffmpeg full-rate RGB decode of the front-camera segment (1024x576, 20 fps), frame at the given index, PIL bicubic resize to 224x224, JPEG quality 95",
+ "images": [
+  {
+   "name": "fb_p00_16577_t00182",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117062507301.ts",
+   "frame_index": 329,
+   "goal_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117062523801.ts",
+   "goal_index": 58,
+   "frame_sha256": "9676a3d8576e7d8c315bff0b1a32a420d80f89382b077579b168284f1d394e93",
+   "goal_sha256": "1e9c6b7c7c2d10288639d9eb14402728c0721611c15df410e8d0a468999c6d91"
+  },
+  {
+   "name": "fb_p00_16577_t00322",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117062735801.ts",
+   "frame_index": 169,
+   "goal_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117062735801.ts",
+   "goal_index": 236,
+   "frame_sha256": "1562fe435824e61f16840f8d395c89a7fbeac1b8fe932df2b4e1c2199e3789f3",
+   "goal_sha256": "3035cf32cb449793a71e163956f6279c1c8eab1bad92c6a78378efd27885c574"
+  },
+  {
+   "name": "fb_p00_16577_t00495",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117063020801.ts",
+   "frame_index": 329,
+   "goal_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117063037301.ts",
+   "goal_index": 118,
+   "frame_sha256": "27e131982e83298da1513d0854be16ba70c778974e977540faed3035d2c57d84",
+   "goal_sha256": "7f35584931daefa05a71f1f7bb49ff9eb18d0809d46ec4a497c3f02364197596"
+  },
+  {
+   "name": "fb_p00_16577_t00644",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117063249301.ts",
+   "frame_index": 329,
+   "goal_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117063305801.ts",
+   "goal_index": 68,
+   "frame_sha256": "7ca4cb105ae5d6d68a79ecee23eb8066282a6bf4260916d7832ad0f0834c2df8",
+   "goal_sha256": "8267dcce32e425eacd48d3a6fc265b7e813e75f259b060b4c38e2e9ce96312ee"
+  },
+  {
+   "name": "fb_p00_16577_t00798",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117063534301.ts",
+   "frame_index": 129,
+   "goal_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117063534301.ts",
+   "goal_index": 190,
+   "frame_sha256": "aa1889b038f95e9dcb0e5ab92f6124e6ab3cb5858d1d078560f36988924363d1",
+   "goal_sha256": "71edd25bf6c756fdaf3a2a783a2d3e6dbcf04cfa92fbb63d00832224a6b07377"
+  },
+  {
+   "name": "fb_p00_16577_t00955",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117063802801.ts",
+   "frame_index": 289,
+   "goal_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117063819301.ts",
+   "goal_index": 18,
+   "frame_sha256": "aa86aad52f05143151f8a5bc36b9618dc6ab11a179cd153f4a34eed74340748f",
+   "goal_sha256": "47acf327cb6d03d57354b9314c40c269fafeacb3f653d9205bed30be1d809a84"
+  },
+  {
+   "name": "fb_p00_16577_t01111",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117064047801.ts",
+   "frame_index": 109,
+   "goal_segment": "output_rides_0/ride_16577_20240117062216/recordings/d5780a18d74eb0728d151fb2d72c7642_ride_16577__uid_s_1000__uid_e_video_20240117064047801.ts",
+   "goal_index": 168,
+   "frame_sha256": "c75bcffdf98f1fc691263b29696a30acd8e3100b956b67a83574f42e8224cc48",
+   "goal_sha256": "230ef385cfa21b990171736803b16118d78f171e915562f2addafafacea527da"
+  },
+  {
+   "name": "fb_p00_17102_t00150",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_17102_20240125075115/recordings/8be1eb80ff433b86ff389f857c19ddf2_ride_17102__uid_s_1000__uid_e_video_20240125075347995.ts",
+   "frame_index": 29,
+   "goal_segment": "output_rides_0/ride_17102_20240125075115/recordings/8be1eb80ff433b86ff389f857c19ddf2_ride_17102__uid_s_1000__uid_e_video_20240125075347995.ts",
+   "goal_index": 99,
+   "frame_sha256": "5bb5bae615732ae0e85db7fd3c7a80298af91f607bf4b9af89ab2f6b76129035",
+   "goal_sha256": "f3aab17749835c96ec6ba96a2d2e2e9abb9ee3461802505886ac4f0c88fe3fb2"
+  },
+  {
+   "name": "fb_p00_17102_t00298",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_17102_20240125075115/recordings/8be1eb80ff433b86ff389f857c19ddf2_ride_17102__uid_s_1000__uid_e_video_20240125075616495.ts",
+   "frame_index": 29,
+   "goal_segment": "output_rides_0/ride_17102_20240125075115/recordings/8be1eb80ff433b86ff389f857c19ddf2_ride_17102__uid_s_1000__uid_e_video_20240125075616495.ts",
+   "goal_index": 123,
+   "frame_sha256": "92002f16802c25d8f95ee37950924db3e742de239fb9b24458271732662ccb98",
+   "goal_sha256": "e1eb06054a5c49a23d918f62b6d1b92bfac8bbeb4b726f46e951cec5bf90b22a"
+  },
+  {
+   "name": "fb_p00_17102_t00453",
+   "part": 0,
+   "frame_segment": "output_rides_0/ride_17102_20240125075115/recordings/8be1eb80ff433b86ff389f857c19ddf2_ride_17102__uid_s_1000__uid_e_video_20240125075844995.ts",
+   "frame_index": 149,
+   "goal_segment": "output_rides_0/ride_17102_20240125075115/recordings/8be1eb80ff433b86ff389f857c19ddf2_ride_17102__uid_s_1000__uid_e_video_20240125075844995.ts",
+   "goal_index": 247,
+   "frame_sha256": "17c2855b4459439ab10805c60890c144ac56f390a7deb3152a90b5c39f09f8d9",
+   "goal_sha256": "520a9259e0b934de11ea7e60ac86b164b6a9d53baa19d6831f8a3e5da6444e66"
+  }
+ ]
+}
