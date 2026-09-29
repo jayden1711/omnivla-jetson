@@ -99,4 +99,5 @@ Copy the Jetson and Kaggle outputs (`mf_results/`, `results/*.npz`) into `result
 `refresh_analysis.py` and `cache_analysis.py` (goal cache), `soak_analysis.py`, `exq_analysis.py` and
 `lora_seed_analysis.py` (execution-weighted quantization), `lang_analysis.py` (CAST test), `lelan_analysis.py`
 (object-goal test), `edge_compare.py`
-(7B vs OmniVLA-edge, all tests).
+(7B vs OmniVLA-edge, all tests; `JETSON_NPZ=results/cross_jet_orig.npz` takes the Jetson outputs of the current
+Marlin-vision runtime from the cross-mode run and adds the object-goal row).

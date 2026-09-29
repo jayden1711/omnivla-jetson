@@ -1,6 +1,8 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 1.0.0 (2026-09-29)
+
+Release notes: `RELEASE_NOTES.md`.
 
 ### Added
 - Vision encoders on Marlin (default): GPTQ per-channel int4 for all 204 vision linears, SigLIP zero-padded to Marlin's
@@ -47,6 +49,13 @@
 - Power and energy per inference at 15W, 25W and MAXN_SUPER, measured on the Jetson (`eval/jetson/power_measure.py`,
   `eval/jetson/run_power_sweep.sh`, `results/power_summary.md`): 8.6-9.3 J per pose-goal prediction and 23.8-24.9 J per
   image-goal prediction in every mode.
+- README restructured for the release: headline, demo, the original-vs-this-repo-vs-edge table and a quick start on
+  top; the NF4 comparison, the Marlin-vs-HQQ4 vision numbers, the language ablation and the CAST details moved to
+  `docs/results.md`, the hardware test lists to `docs/validation.md`, the demo captions to `docs/demos.md`.
+- `eval/analysis/edge_compare.py`: `JETSON_NPZ=results/cross_jet_orig.npz` takes the Jetson int4 outputs from the
+  cross-mode run (Marlin vision) and adds the object-goal row; `results/edge_vs_7b.md` regenerated with it (image goal
+  1.301 vs 1.490, p = 0.011; 5 s pose 1.177 vs 1.387, p = 0.003; object goal 82% vs 70%, p = 2e-5). The 20 s pose and
+  CAST rows stay Kaggle-simulated with HQQ4 vision.
 - `docs/troubleshooting.md`, a safety section in the README, `CITATION.cff`, and a GitHub Actions workflow (syntax
   checks, API tests, rover protocol tests, mock test of `setup_jetson.sh`).
 

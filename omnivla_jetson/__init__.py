@@ -2,4 +2,4 @@
 from .api import MODE_NAMES, VALIDATED_MODES, OmniVLAJetson, Prediction
 
 __all__ = ["OmniVLAJetson", "Prediction", "MODE_NAMES", "VALIDATED_MODES"]
-__version__ = "0.2.0"
+__version__ = "1.0.0"

@@ -8,8 +8,8 @@ authors:
     alias: jayden1711
 repository-code: "https://github.com/jayden1711/omnivla-jetson"
 license: MIT
-version: 0.2.0
-date-released: "2026-09-28"
+version: 1.0.0
+date-released: "2026-09-29"
 keywords:
   - vision-language-action
   - robot navigation

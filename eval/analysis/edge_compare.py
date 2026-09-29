@@ -8,10 +8,13 @@
 # Usage, from a folder with results/ (gt files, compress_tests.npz, compress_gptqx_lang.npz, compress_lang.npz,
 # edge_tests.npz, mf_results/e2e_deploy_gptq@{4,6}) and cast_lang.npz:
 #   python eval/analysis/edge_compare.py cast_lang.npz      -> results/edge_vs_7b.md, results/edge_vs_7b.csv
-import glob, json, os, sys
+# JETSON_NPZ=results/cross_jet_orig.npz takes the Jetson int4 outputs (img3m, pose5 and the LeLaN object-goal test)
+# from a cross_mode_eval.py file instead (the Marlin-vision runtime, 2026-09-29) and adds the object-goal row
+# (picks the named object, McNemar test), with results/lelan_lang.npz for the object labels.
+import glob, json, math, os, sys
 import numpy as np
 import pandas as pd
-from scipy.stats import wilcoxon
+from scipy.stats import binomtest, wilcoxon
 
 R = "results"
 D = {}
@@ -24,6 +27,13 @@ def jetson(name):
     return {os.path.basename(p)[:-4]: np.load(p)["act"].reshape(8, 4) for p in glob.glob(f"{R}/mf_results/e2e_{name}/*.npz")
             if not p.endswith("_summary.npz")}
 J = {"img3m": jetson("deploy_gptq@6"), "pose5": jetson("deploy_gptq@4")}
+JZ = os.environ.get("JETSON_NPZ")
+if JZ:                                                     # Jetson outputs of the current runtime (cross_mode_eval.py)
+    Z = dict(np.load(JZ, allow_pickle=True)); JC = os.path.basename(JZ)[6:-4]   # cross_<config>.npz
+    J = {t: {k.split("__")[2]: np.asarray(Z[k]).reshape(8, 4) for k in Z if k.startswith(f"{JC}__{t}__")} for t in ("img3m", "pose5", "lelan")}
+    LZ = np.load(f"{R}/lelan_lang.npz", allow_pickle=True); LM = json.loads(str(LZ["meta"]))
+    D.update({k: v for k, v in np.load(f"{R}/compress_lelan.npz", allow_pickle=True).items()})
+    D.update({k: v for k, v in np.load(f"{R}/compress_gptqx_lelan.npz", allow_pickle=True).items()})
 FR = {"img3m": sorted(rel[rel.img_ok].frame), "pose5": sorted(f for f in rel.frame if f"goal__{f}" in gz.files),
       "pose20": sorted(f for f in rel[rel.far_ok].frame if f"goal20__{f}" in tn.files),
       "lang": sorted(k for k in CM if CM[k]["reliable"])}
@@ -59,7 +69,7 @@ for t, fr in FR.items():
     verdict = ("7B better" if d.mean() > 0 else "edge better") if sig_p and sig_ci else \
               ("mixed (rank test and CI disagree)" if sig_p or sig_ci else "no significant difference")
     agree = None
-    if t in J:                                             # Kaggle-simulated int4 vs the Jetson, same weights
+    if t in J and not JZ:                                  # Kaggle-simulated int4 vs the Jetson, same weights (HQQ4 vision both)
         agree = np.mean([np.linalg.norm(J[t][f][:, :2] - np.asarray(D[f"gptqx_pc4__{t}__{f}"]).reshape(8, 4)[:, :2], axis=1).mean() for f in fr])
     r = dict(test=t, n=len(fr), checks_perception=perc, bf16=b.mean(), int4=q.mean(),
              int4_source="Jetson" if t in J else "Kaggle-simulated", edge=e_.mean(), edge_minus_int4=d.mean(), ci_lo=lo, ci_hi=hi,
@@ -67,6 +77,26 @@ for t, fr in FR.items():
     if D.get(f"edge-nohist__{t}__{fr[0]}") is not None:
         r["edge_no_history"] = errs("edge-nohist", t).mean()
     rows.append(r)
+obj = None
+if JZ:                                                     # object goal: picks the named object (as lelan_analysis.py)
+    K = sorted(LM)
+    bear = lambda xy: math.degrees(math.atan2(xy[1], xy[0])); adiff = lambda x, y: abs((x - y + 180) % 360 - 180)
+    def picks(f):
+        out = []
+        for k in K:
+            b = bear(f(k)[-1, :2]); out.append(adiff(b, bear(LM[k]["target_xy"])) < adiff(b, bear(LM[k]["distractor_xy"])))
+        return np.array(out)
+    if any(k not in J["lelan"] for k in K) or any(f"edge__lelan__{k}" not in D for k in K):
+        sys.exit("[CMP] lelan: missing Jetson or edge outputs - refusing to write a summary")
+    pk = {"bf16": picks(lambda k: np.asarray(D[f"bf16__lelan__{k}"]).reshape(-1, 8, 4)[0]), "int4": picks(lambda k: J["lelan"][k]),
+          "edge": picks(lambda k: np.asarray(D[f"edge__lelan__{k}"]).reshape(-1, 8, 4)[0])}
+    n01, n10 = int(np.sum(pk["int4"] & ~pk["edge"])), int(np.sum(~pk["int4"] & pk["edge"]))
+    obj = dict(n=len(K), bf16=pk["bf16"].mean(), int4=pk["int4"].mean(), edge=pk["edge"].mean(),
+               p=binomtest(n01, n01 + n10).pvalue if n01 + n10 else 1.0)
+    rows.append(dict(test="lelan", n=obj["n"], checks_perception=True, bf16=obj["bf16"], int4=obj["int4"], int4_source="Jetson",
+                     edge=obj["edge"], edge_minus_int4=obj["edge"] - obj["int4"], ci_lo=np.nan, ci_hi=np.nan, p=obj["p"],
+                     verdict="7B better" if obj["p"] < 0.05 and obj["int4"] > obj["edge"] else "no significant difference",
+                     kaggle_vs_jetson=None))
 T = pd.DataFrame(rows)
 T.round(4).to_csv(f"{R}/edge_vs_7b.csv", index=False)
 
@@ -76,15 +106,24 @@ say("| Test | n | Test checks perception | 7B bf16 | 7B int4 (deployed) | OmniVL
 say("|---|---|---|---|---|---|---|---|")
 for r in rows:
     src = "" if r["int4_source"] == "Jetson" else " (Kaggle-sim.)"
+    if r["test"] == "lelan":
+        say(f"| Object goal (LeLaN), picks the named object (higher is better) | {r['n']} | yes | {r['bf16']:.0%} | {r['int4']:.0%} | "
+            f"{r['edge']:.0%} | {r['edge_minus_int4']*100:+.0f} points, McNemar p={r['p']:.2g} | {r['verdict']} |")
+        continue
     say(f"| {NAMES[r['test']]} | {r['n']} | {'yes' if r['checks_perception'] else 'no'} | {r['bf16']:.3f} | {r['int4']:.3f}{src} | "
         f"{r['edge']:.3f} | {r['edge_minus_int4']:+.3f} [{r['ci_lo']:+.3f}, {r['ci_hi']:+.3f}], p={r['p']:.2g} | {r['verdict']} |")
-say("\n7B int4 on img3m and pose5: outputs of the deployed runtime on the Jetson. On pose20 and language: the deployed int4 "
+say("\n7B int4 on img3m and pose5" + (" and the object goal" if JZ else "") + ": outputs of the deployed runtime on the Jetson"
+    + (f" ({JZ}: GPTQ int4 LLM and GPTQ int4 Marlin vision, the current default; the Kaggle-simulated rows below still use the "
+       "previous HQQ4 vision, which did not differ significantly from it: results/vismarlin_summary.md)" if JZ else "")
+    + ". On pose20 and language: the deployed int4 "
     "weights run on a Kaggle T4 with fp16 dequantized kernels (not Marlin/GemLite, not bit-exact). OmniVLA-edge: fp32, "
     "run off the Jetson with OmniVLA's edge preprocessing and the 5 real past frames (eval/edge/edge_eval.py); "
     "language samples have no past frames, so the current frame is repeated, as OmniVLA's CAST loader does. "
-    "Kaggle-simulated vs Jetson outputs of the same int4 weights: "
-    + ", ".join(f"{r['test']} {r['kaggle_vs_jetson']:.4f}" for r in rows if r["kaggle_vs_jetson"] is not None)
-    + " action units on average.")
+    + ("Kaggle-simulated vs Jetson outputs of the same int4 weights: "
+       + ", ".join(f"{r['test']} {r['kaggle_vs_jetson']:.4f}" for r in rows if r["kaggle_vs_jetson"] is not None)
+       + " action units on average." if not JZ else
+       "Kaggle-simulated vs Jetson outputs of the same Marlin-vision weights: img3m 0.0032 action units on average "
+       "(results/vismarlin_summary.md)."))
 nh = [r for r in rows if "edge_no_history" in r]
 if nh:
     say("Edge without past frames (current frame repeated, as run_omnivla_edge.py does): "
@@ -92,17 +131,17 @@ if nh:
 say("\n## On the Jetson Orin Nano 8 GB\n")
 say("| | 7B int4 (this repo) | OmniVLA-edge |")
 say("|---|---|---|")
-say("| Latency, pose goal | 375-395 ms with CUDA graphs (default; differs between boots), 424 ms without (MAXN_SUPER) | 112.8 ms (MAXN_SUPER + "
+say("| Latency, pose goal | 271 ms (Marlin vision, CUDA graphs, MAXN_SUPER; 374 ms with HQQ4 vision, 424 ms without graphs) | 112.8 ms (MAXN_SUPER + "
     "jetson_clocks); 131.7-151.5 ms at 25W |")
-say("| Latency, image goal | 980-1012 ms with CUDA graphs, 1056 ms without (MAXN_SUPER) | same model call as pose |")
-say("| Latency, language goal | 650-735 ms with CUDA graphs, 700-770 ms without (no pruning in language modes; "
-    "results/jetson_validation_2026-09-28.md) | "
+say("| Latency, image goal | 775 ms, 711 ms when the goal is unchanged (981 ms with HQQ4 vision) | same model call as pose |")
+say("| Latency, language goal | 549-564 ms (no pruning in language modes; 663-672 ms with HQQ4 vision; "
+    "results/vismarlin_summary.md) | "
     "same model call as pose |")
-say("| Memory | 4.14 GiB weights on the GPU; RAM peak 6565 / 6769 MB of 7620 (pose / image) | 1.10 GB peak GPU memory |")
+say("| Memory | 4.13 GiB weights on the GPU; RAM peak 6272 / 6286 MB of 7620 (pose / image) | 1.10 GB peak GPU memory |")
 say("| Weights on disk | 4.1 GB | 0.43 GB + CLIP ViT-B/32 for the text encoder (0.35 GB) |")
 say("| Power, energy per inference (MAXN_SUPER) | 20.2 W, 8.8 J pose; 22.7 W, 23.8 J image goal; 21.5 W, 16.8 J "
     "language (results/power_summary.md) | not measured |")
-say("\n7B: results/gptq_validation.md (deployed runtime, 100 frames). Edge: results/edge_jetson.md (measured earlier with "
+say("\n7B: results/vismarlin_summary.md and results/gptq_validation.md (deployed runtime, 100 frames). Edge: results/edge_jetson.md (measured earlier with "
     "OmniVLA's run_omnivla_edge.py and a timing wrapper around the model call, not with this repo's package; the edge "
     "latency covers the model call only, the 7B latency the forward pass of the runtime).")
 open(f"{R}/edge_vs_7b.md", "w").write("\n".join(L) + "\n")

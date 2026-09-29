@@ -14,8 +14,9 @@ int4 model's lower error here (Wilcoxon p = 0.0006) is not evidence of better dr
 advantage.
 
 This repo: results/cross_mode_summary.md (jet_orig, Marlin vision, 2026-09-29) and results/vismarlin_summary.md. Edge
-and bf16: results/edge_vs_7b.md, results/lelan_summary.md. The edge comparisons in edge_vs_7b.md were made against the
-previous HQQ4-vision deployment.
+and bf16: results/edge_vs_7b.md, results/lelan_summary.md. edge_vs_7b.md compares edge with the same Marlin-vision
+Jetson outputs on the image-goal, 5 s pose and object-goal tests; its 20 s pose and CAST rows are Kaggle-simulated with
+the previous HQQ4 vision.
 
 ## Memory
 
