@@ -28,7 +28,7 @@ def _grid_keep(n):
 
 class OmniVLADeploy:
     def __init__(self, deploy_dir, repo=DEFAULT_REPO, prune_frac=0.75, verbose=True, trim_every=20, goal_refresh=GOAL_REFRESH,
-                 vit_trunc=True, lang_prune_frac=0.0):
+                 vit_trunc=True, lang_prune_frac=0.0, cuda_graphs=True, llm_kv_cache=False):
         t0 = time.time()
         self.dir, self.log = deploy_dir, (print if verbose else (lambda *a, **k: None))
         if repo not in sys.path:
@@ -141,9 +141,20 @@ class OmniVLADeploy:
         self.action_tokenizer = R.ActionTokenizer(self.processor.tokenizer)
         self.vla = vla.eval()
         self.goal_refresh = max(1, int(goal_refresh))
+        # llm_kv_cache=False (default since 2026-09-28): the LLM does not build its key/value cache (use_cache=False). The
+        # runtime never reads it (one forward pass per prediction, no generation); outputs are bit-identical on the Jetson.
+        self._llm_kw = {} if llm_kv_cache else dict(use_cache=False)
         self._install_token_hooks(prune_frac, lang_prune_frac)
         if vit_trunc:
             self._install_vit_trunc()
+        if cuda_graphs and self.goal_refresh > 1:             # goal K/V reuse branches on Python state between calls
+            self.log("[DEPLOY] CUDA graphs off: not compatible with goal_refresh > 1", flush=True)
+            cuda_graphs = False
+        self.cuda_graphs = bool(cuda_graphs)
+        if cuda_graphs:                                        # default since 2026-09-28: bit-exact, 3-10% faster on the Jetson
+            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+            import cuda_graphs as CG
+            CG.install(self.vla, self.log)
         self._inf = R.Inference(save_dir="/tmp", lan_inst_prompt="", goal_utm=(0.0, 0.0), goal_compass=0.0,
                                 goal_image_PIL=None, action_tokenizer=self.action_tokenizer, processor=self.processor)
         gc.collect(); torch.cuda.empty_cache(); libc.malloc_trim(0)
@@ -321,7 +332,8 @@ class OmniVLADeploy:
                            pixel_values=batch["pixel_values"].to(DT).to(dev), modality_id=mid.to(DT).to(dev),
                            labels=batch["labels"].to(dev), output_hidden_states=True,
                            proprio=batch["goal_pose"].to(DT).to(dev), proprio_projector=self.pose_projector,
-                           noisy_actions=None, noisy_action_projector=None, diffusion_timestep_embeddings=None, use_film=False)
+                           noisy_actions=None, noisy_action_projector=None, diffusion_timestep_embeddings=None, use_film=False,
+                           **self._llm_kw)
         gt = batch["labels"][:, 1:].to(dev)
         mask = self._masks[0](gt) | self._masks[1](gt)
         h = out.hidden_states[-1][:, self.num_patches:-1]

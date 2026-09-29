@@ -6,14 +6,20 @@
 - **Vision:** HQQ 4-bit on the GemLite kernel.
 - **Tokens:** modality elision, then uniform-grid pruning of 75% of the current-image tokens in pose and image-goal
   modes. Language modes (7, 8) are not pruned: pruning cut object-goal accuracy from 84% to 69%
-  ([results/lelan_summary.md](../results/lelan_summary.md)). Their latency is therefore higher, about 750 ms instead
-  of about 430 ms (estimated from pose-mode measurements without pruning; not yet measured in language mode).
+  ([results/lelan_summary.md](../results/lelan_summary.md)). Their latency is therefore higher: 650-735 ms on the
+  Jetson with CUDA graphs (700-770 ms without; it differs between boots).
   `OmniVLADeploy(..., lang_prune_frac=0.5)` trades some accuracy for speed (81% on the same test, not significantly below 84%).
 - **Image goal:** the goal image's vision features are computed once per goal (exact). Reusing the goal tokens' keys/values
   as well is **off by default** (`goal_refresh=1`): OmniVLA's attention is bidirectional, so those keys/values depend on the
   current frame and reuse is an approximation that measurably costs about +0.02 driving error. Opt in with
   `OmniVLADeploy(..., goal_refresh=3)` / ROS `-p goal_refresh:=3` (full pass on goal change and every 3 predictions; ~2.4x faster).
 - **Weights:** quantized offline and loaded pre-packed.
+- **CUDA graphs** (default, `cuda_graphs=True`): the two vision encoders and the 32-layer LLM stack are captured once
+  per input shape and replayed; outputs are bit-identical, pose goals 7-10% faster, image goals 3-5%, language 5-6%
+  (`deploy/cuda_graphs.py`, `tools/graph_check.py`). Capturing adds ~4.6 s to the warm-up. They are turned off
+  automatically with `goal_refresh > 1`. `cuda_graphs=False` restores the previous path.
+- **No key/value cache** (default, `llm_kv_cache=False`): the LLM does not build the cache that the runtime never reads.
+  Outputs are bit-identical; without CUDA graphs it frees 283 MB of RAM.
 
 It also contains a ROS 2 node for the Troupe rover.
 
@@ -21,9 +27,9 @@ Measured on the Jetson (100 in-distribution FrodoBots frames, single predictions
 
 | | Deployed config (GPTQ) | NF4 baseline |
 |---|---|---|
-| Latency, pose goal | 424 ms | 1416 ms |
-| Latency, image goal | 1056 ms on a new goal, 863 ms while it stays fixed (444 ms with opt-in K/V reuse) | 2146 ms |
-| RAM headroom (of 7620 MB) | 1055 MB pose / 851 MB image | 827 / 575 MB |
+| Latency, pose goal | 375-395 ms with CUDA graphs (default; differs between boots), 424 ms without | 1416 ms |
+| Latency, image goal | 980-1012 ms with CUDA graphs, 1056 ms without; 863 ms while the goal stays fixed (444 ms with opt-in K/V reuse; no CUDA graphs then) | 2146 ms |
+| RAM headroom (of 7620 MB) | 930-1030 MB with CUDA graphs (all modes in one process); first validation without: 1055 MB pose / 851 MB image | 827 / 575 MB |
 | Fidelity to bf16 (lower = closer) | 0.48 (round-to-nearest weights: 1.09) | 0.30 |
 | Driving error vs NF4 (image-goal test) | -0.003 action units, 95% CI [-0.09, +0.08], p = 0.76 | |
 

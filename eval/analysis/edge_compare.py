@@ -92,13 +92,16 @@ if nh:
 say("\n## On the Jetson Orin Nano 8 GB\n")
 say("| | 7B int4 (this repo) | OmniVLA-edge |")
 say("|---|---|---|")
-say("| Latency, pose goal | 424 ms (MAXN_SUPER) | 112.8 ms (MAXN_SUPER + jetson_clocks); 131.7-151.5 ms at 25W |")
-say("| Latency, image goal | 1056 ms, 863 ms with an unchanged goal (MAXN_SUPER) | same model call as pose |")
-say("| Latency, language goal | about 750 ms, estimated (no pruning in language modes; pose mode without pruning measured "
-    "754 ms); pending a Jetson measurement | same model call as pose |")
+say("| Latency, pose goal | 375-395 ms with CUDA graphs (default; differs between boots), 424 ms without (MAXN_SUPER) | 112.8 ms (MAXN_SUPER + "
+    "jetson_clocks); 131.7-151.5 ms at 25W |")
+say("| Latency, image goal | 980-1012 ms with CUDA graphs, 1056 ms without (MAXN_SUPER) | same model call as pose |")
+say("| Latency, language goal | 650-735 ms with CUDA graphs, 700-770 ms without (no pruning in language modes; "
+    "results/jetson_validation_2026-09-28.md) | "
+    "same model call as pose |")
 say("| Memory | 4.14 GiB weights on the GPU; RAM peak 6565 / 6769 MB of 7620 (pose / image) | 1.10 GB peak GPU memory |")
 say("| Weights on disk | 4.1 GB | 0.43 GB + CLIP ViT-B/32 for the text encoder (0.35 GB) |")
-say("| Power, energy per inference | pending | pending |")
+say("| Power, energy per inference (MAXN_SUPER) | 20.2 W, 8.8 J pose; 22.7 W, 23.8 J image goal; 21.5 W, 16.8 J "
+    "language (results/power_summary.md) | not measured |")
 say("\n7B: results/gptq_validation.md (deployed runtime, 100 frames). Edge: results/edge_jetson.md (measured earlier with "
     "OmniVLA's run_omnivla_edge.py and a timing wrapper around the model call, not with this repo's package; the edge "
     "latency covers the model call only, the 7B latency the forward pass of the runtime).")

@@ -58,6 +58,20 @@ Latency and GPU memory stay flat. It is glibc keeping freed per-frame buffers. T
 - The ROS node stops the rover (LOWMEM) when available memory falls below 300 MB.
 - Do not set `MALLOC_MMAP_THRESHOLD_` or `MALLOC_ARENA_MAX`: they made the growth worse (+175 MB per 10 minutes).
 
+## Language-mode latency differs between boots
+
+Language-mode predictions took about 770 ms on some boots and about 700 ms on others, including right after a reboot;
+within one boot the numbers are stable (pose and image goal differ by only 1-2%). The cause was not investigated. Measure
+latency from a fresh boot, compare configurations within the same boot, and restart the node (or reboot) periodically;
+the memory-creep advice below already
+asks for a restart every ~2 hours.
+
+## Out of memory with CUDA graphs
+
+CUDA graphs are on by default and were soak-tested on the Jetson (30 minutes, all modes, no memory errors). If a
+process runs out of memory while capturing (NvMap error 12 right after start), reboot and run with
+`OmniVLADeploy(..., cuda_graphs=False)` to check whether graphs are the cause.
+
 ## Slow first predictions
 
 The first calls compile the GPU kernels (about 14 s on the Orin). Call `warmup()` before serving; the ROS node does this at startup.

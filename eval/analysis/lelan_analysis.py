@@ -41,6 +41,10 @@ def mcnemar(a, b):                                               # paired exact 
 CFGS = [("7B bf16", "bf16"), ("7B fp16", "fp16"), ("7B fp16, 75% pruning (no quantization)", "fp16_spatial75"),
         ("7B int4 deployed (75% pruning)", "gptqx_pc4"), ("7B int4, 0% pruning", "gptqx_pc4_none"),
         ("7B int4, 50% pruning", "gptqx_pc4_spatial50"), ("7B int4, 75% pruning (same-session rerun)", "gptqx_pc4_spatial75"),
+        ("7B int4, 25% uniform pruning", "gptqx_pc4_spatial25"),
+        ("7B int4, 25% prompt-aware pruning", "gptqx_pc4_prompt25"), ("7B int4, 50% prompt-aware pruning", "gptqx_pc4_prompt50"),
+        ("7B int4, 75% prompt-aware pruning", "gptqx_pc4_prompt75"),
+        ("7B int4, 75% prompt-aware, original SigLIP (reference)", "gptqx_pc4_promptorig75"),
         ("OmniVLA-edge", "edge")]
 for _, c in CFGS:                                          # every frame or none: a partial run must not be summarized
     n = sum(pred(c, k) is not None for k in K)
@@ -102,5 +106,22 @@ if all(c in res for c in ("bf16", "gptqx_pc4_none", "gptqx_pc4_spatial50", "gptq
         "left image-goal and pose-goal driving error unchanged cut object-goal accuracy by about 15 points. Fidelity "
         "(distance from bf16 actions) overstates the damage for pose and image goals, but a driving-error test on those "
         "modes would have understated it for language: each goal modality needs its own task-grounded test.\n")
+if all(c in res for c in ("gptqx_pc4_prompt25", "gptqx_pc4_prompt50", "gptqx_pc4_prompt75", "gptqx_pc4_spatial50")):
+    r = {c: 100 * res[c][0].mean() for c in res}
+    say("## Prompt-aware pruning (same deployed int4 weights)\n")
+    say("Rule fixed before the run: adopt only if prompt-aware pruning keeps >= 81% (uniform 50% pruning) at a higher "
+        "pruning rate than 50%, i.e. at 75%. Patches are scored by similarity to the object phrase in SigLIP's image-text "
+        "space (deploy/prompt_prune.py); \"original SigLIP\" uses the released image tower instead of OmniVLA's fine-tuned "
+        "one, as a reference for whether fine-tuning broke the image-text alignment.\n")
+    say("| Pruning | Uniform grid | Prompt-aware (fine-tuned SigLIP) | Prompt-aware (original SigLIP) |")
+    say("|---|---|---|---|")
+    for pct in (25, 50, 75):
+        u = r.get(f"gptqx_pc4_spatial{pct}"); pa = r.get(f"gptqx_pc4_prompt{pct}"); po = r.get(f"gptqx_pc4_promptorig{pct}")
+        f = lambda v: "-" if v is None else f"{v:.0f}%"
+        say(f"| {pct}% | {f(u)} | {f(pa)} | {f(po)} |")
+    ok = r["gptqx_pc4_prompt75"] >= 81
+    say(f"\nNo pruning: {r['gptqx_pc4_none']:.0f}%. Prompt-aware at 75%: {r['gptqx_pc4_prompt75']:.0f}% "
+        f"(vs uniform 75%: p={mcnemar(res['gptqx_pc4_prompt75'][0], res['gptqx_pc4_spatial75'][0]):.2g}) -> "
+        f"**{'adopt' if ok else 'not adopted'}** under the rule.\n")
 open("results/lelan_summary.md", "w").write("\n".join(L) + "\n")
 print("\n".join(L))

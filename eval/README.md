@@ -45,7 +45,9 @@ identical, tensor for tensor, to the deployed ones (`build/reference_tensor_hash
 dequantized, not the Jetson's Marlin/GemLite, so these int4 numbers are close to the Jetson's but not bit-exact.
 `LANG_TEST=lelan eval/kaggle/lang_eval.sh` (~0.8 GPU-hour) does the same for the LeLaN object-goal test (the "shuffled
 instruction" control is the other object's prompt on the same image) and also predicts the demo clips with the deployed
-int4 weights. `LANG_TEST=ablation` (~0.8 GPU-hour) is the pruning ablation on the same test: fp16 with 75% pruning,
+int4 weights. `LANG_TEST=promptprune` (~0.7 GPU-hour) tests prompt-aware pruning (`deploy/prompt_prune.py`: patches ranked by SigLIP
+image-text similarity to the object phrase) at 25/50/75%, with uniform 25% for comparison and the original SigLIP image
+tower at 75% as a reference; it needs `open_clip_torch==2.24.0`. `LANG_TEST=ablation` (~0.8 GPU-hour) is the pruning ablation on the same test: fp16 with 75% pruning,
 then the deployed int4 weights (GPTQ calibrated as built) at 0%, 50% and 75% pruning. `kaggle_compress.py` stops if a
 test named in `TESTS_ONLY` has no frames.
 
@@ -70,6 +72,9 @@ Copy `eval/jetson/*` into the OmniVLA clone on the Jetson (default root `/mnt/nv
 - `run_soak6.sh`: image-goal soaks.
 - `marlin_pc_gate.py`, `marlin_sm87_repro.py`: Marlin correctness on sm_87 (see `docs/marlin_sm87_bug.md`).
 - `wait_job.sh` (runs on the PC): waits for a tmux job on the Jetson with a timeout and a stall check.
+- `lang_latency.py`: latency and memory per mode (`MODES=4,6,7,8`, `GRAPHS=1`, `NOCACHE=1`); `graph_soak.py`: 30-minute
+  soak cycling modes 4, 6, 7; `determinism.sh`: N fresh processes, bit-identical outputs; `profile_launch.py`: per-stage
+  GPU vs wall time (torch.profiler).
 - `power_measure.py` / `run_power_sweep.sh`: board power and energy per inference at 15W, 25W and MAXN_SUPER (asks
   before each power-mode change; `power_analysis.py` writes `results/power_summary.md`). Not run yet.
 

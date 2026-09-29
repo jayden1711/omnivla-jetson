@@ -19,13 +19,15 @@ Jetson Orin Nano 8 GB (MAXN SUPER), 100 FrodoBots frames, image-goal driving tes
 
 | | This repo | bitsandbytes NF4 | bf16 (cloud GPU) |
 |---|---|---|---|
-| Latency, pose goal | 424 ms | 1416 ms | - |
-| Latency, image goal | 1056 ms (863 ms with an unchanged goal) | 2146 ms | - |
-| RAM headroom, pose / image | 1055 / 851 MB | 827 / 575 MB | does not fit |
+| Latency, pose goal | 375-395 ms (424 ms without CUDA graphs) | 1416 ms | - |
+| Latency, image goal | 980-1012 ms (1056 ms without CUDA graphs, 863 ms without them when the goal is unchanged) | 2146 ms | - |
+| RAM headroom | 930-1030 MB, all modes in one process (the first validation, without CUDA graphs: 1055 pose / 851 MB image) | 827 / 575 MB | does not fit |
 | Distance from bf16 actions | 0.48 | 0.30 | 0 |
 | Driving error vs the human's path | 1.314 | 1.317 | 1.330 |
 
-The driving error of this repo's config is not significantly different from NF4 (p = 0.76) or bf16 (p = 0.40). Details:
+CUDA graphs (on by default) give bit-identical outputs, so the accuracy numbers hold with and without them. Latency
+ranges: the same code measured on different boots of the same Jetson. The driving
+error of this repo's config is not significantly different from NF4 (p = 0.76) or bf16 (p = 0.40). Details:
 [results/gptq_validation.md](results/gptq_validation.md), [results/final_validation.md](results/final_validation.md),
 [results/](results/).
 
@@ -40,8 +42,8 @@ OmniVLA also comes as OmniVLA-edge, a small model with the same goal types. Same
 | Pose goal 20 s, driving error | 1.515 | 1.586 (not clearly different: p = 0.03, but the CI includes 0) |
 | Object goal ("move toward <object>"), picks the named object | **84%** (language modes run without token pruning) | 70% (7B better, p = 1e-6) |
 | Behavioral instructions (CAST), driving error | 2.231 | 2.188 (no significant difference; neither model trained on them) |
-| Latency on the Jetson | 424 ms pose, 1056 ms image goal, about 750 ms language (estimated, pending) | 113 ms (MAXN SUPER), 132-152 ms (25W) |
-| Memory on the Jetson | 4.14 GiB weights, 0.85-1.06 GB RAM left | 1.10 GB peak GPU memory |
+| Latency on the Jetson | 375-395 ms pose, 980-1012 ms image goal, 650-735 ms language | 113 ms (MAXN SUPER), 132-152 ms (25W) |
+| Memory on the Jetson | 4.14 GiB weights, 0.93-1.03 GB RAM left | 1.10 GB peak GPU memory |
 
 Image goal and 5 s pose goal: the deployed runtime's outputs on the Jetson. 20 s pose goal and language: the same int4
 weights on a Kaggle T4 (fp16 kernels; they match the Jetson to 0.003 action units where both exist). OmniVLA-edge:
@@ -51,14 +53,18 @@ accuracy off the Jetson with its 5 past frames; its latency and memory were meas
 **Recommendation:** use the 7B model for image goals where accuracy matters: it is about 12% more accurate there
 (p = 0.01), and the image-goal test is the only one where blind controls show the model really uses the camera. It is
 also clearly better at object-goal language prompts (84% vs 70%). Use OmniVLA-edge when latency or memory matter more:
-it is about 4-9x faster (113 ms vs 424-1056 ms) and leaves most of the 8 GB free.
+it is about 3.5-9x faster (113 ms vs 375-1012 ms) and leaves most of the 8 GB free.
 
 - With a pose goal the 7B is better at 5 s and not clearly better at 20 s, but the pose tests are weaker checks of
   perception: a shuffled camera image does not make the 7B model clearly worse on them.
 - With a language goal, the 7B only keeps its edge because language modes skip the image-token pruning: with the
   75% pruning used for pose and image goals it drops to 69%, level with edge; see below.
 
-Full table: [results/edge_vs_7b.md](results/edge_vs_7b.md). Power is not measured yet.
+Full table: [results/edge_vs_7b.md](results/edge_vs_7b.md). Power at MAXN SUPER (measured before CUDA graphs became
+the default): 20 W and 8.8 J per pose-goal
+prediction, 23 W and 24 J per image-goal prediction. Lower power modes save watts but not energy: at 15W a pose-goal
+prediction takes 561 ms at 16 W, 9.3 J ([results/power_summary.md](results/power_summary.md)). Edge's power is not
+measured.
 
 ### Language goal
 
@@ -71,8 +77,6 @@ frames from LeLaN's robot recordings, each with two labeled objects in different
 "move toward <object>" for one of them. This is in-distribution: LeLaN is in the checkpoint's training mix, so it checks
 that language mode works as trained, not that it generalizes.
 
-| | Picks the named object | With the other object's prompt |
-|---|---|---|
 | | Picks the named object | With the other object's prompt |
 |---|---|---|
 | 7B full precision (bf16; the control run in fp16) | 84% | 19% |
@@ -88,9 +92,14 @@ deployed config (69%) was clearly below full precision; the ablation above, on t
 75% image-token pruning causes the whole drop, not the int4 weights.** Without pruning the int4 weights match bf16
 (84%, p = 1); 50% pruning costs 3 points (not significant); 75% pruning costs about the same with or without
 quantization. So the runtime and the Python API now skip pruning in language modes (7, 8), and keep 75% for pose and
-image goals, where it did not change driving error. The price is latency: about 750 ms instead of about 430 ms per
-language prediction, estimated from pose-mode measurements without pruning (754 ms) and not yet measured in language
-mode. `lang_prune_frac=0.5` is a middle ground (81%).
+image goals, where it did not change driving error. The price is latency and memory: on the Jetson a language
+prediction takes 650-735 ms with CUDA graphs (700-770 ms without; it differs between boots; pose goal: 375-395 ms),
+with 930-1030 MB of RAM left with all modes in use. `lang_prune_frac=0.5` is a middle ground: 81%, and 538 ms
+without CUDA graphs ([results/jetson_validation_2026-09-28.md](results/jetson_validation_2026-09-28.md)).
+
+Pruning by relevance to the instruction does not help: keeping the image patches most similar to the object phrase (SigLIP
+image-text similarity) scored 69% at 75% pruning, the same as the uniform grid, and 78% at 50% (uniform: 81%)
+([results/lelan_summary.md](results/lelan_summary.md)).
 
 Language grounding turned out to be more sensitive to compression than pose and image goals: the pruning that left
 their driving error unchanged cost 15 points here. Each goal type needs its own task-grounded test.
@@ -105,7 +114,17 @@ about language mode as trained, and the int4-vs-bf16 difference on it (-0.26, p 
 
 On the Jetson Orin Nano 8 GB (JetPack 6.2):
 - Loading, latency and memory of the deployed runtime, pose goal and image goal (100 frames each).
-- Bit-exact reproduction of the validated outputs (`deploy/tools/reference_check.py`, 10 frames x 2 modes).
+- Bit-exact reproduction of the recorded outputs in all four modes (`deploy/tools/reference_check.py`, 10 frames x
+  4 modes), including the mode-dependent pruning, which gives bit-identical pose and image-goal outputs to the previous
+  runtime ([results/jetson_validation_2026-09-28.md](results/jetson_validation_2026-09-28.md)).
+- Language modes (7 and 8): latency and memory, with and without pruning.
+- CUDA graphs (now the default): bit-exact in all four modes, 3-10% faster, and a 30-minute soak cycling all modes
+  (stable latency, no memory errors, 74 C at most).
+- Determinism: 50 fresh processes give bit-identical image-goal outputs.
+- The `omnivla_jetson` package: identical outputs to the runtime in all four modes (`deploy/tools/api_check.py`).
+- `deploy/setup_jetson.sh` end to end in a fresh venv and OmniVLA clone, with the weights downloaded from Hugging Face,
+  and a second run on top of it (`build/jetson_e2e_test.sh --hf`).
+- Power and energy per inference at 15W, 25W and MAXN SUPER ([results/power_summary.md](results/power_summary.md)).
 - 30-minute soaks in pose and image-goal mode: no slowdown, no throttling, slow memory growth ([deploy/SOAK.md](deploy/SOAK.md)).
 - The manual setup steps in [docs/deployment.md](docs/deployment.md), in a fresh venv and a fresh OmniVLA clone.
 - The ROS 2 node in offline replay (recorded camera frames, no rover), including fault injection.
@@ -113,12 +132,9 @@ On the Jetson Orin Nano 8 GB (JetPack 6.2):
 Not tested on hardware yet:
 - The rover: the model has never driven it. The servo bridge has not run on the rover's Pi.
 - Any closed-loop driving. All accuracy numbers are open-loop single predictions.
-- `deploy/setup_jetson.sh` end to end on a Jetson (only its mock test; `build/jetson_e2e_test.sh` is ready).
-- Language modes (7 and 8), including their latency without pruning, and the `omnivla_jetson` package (its check,
-  `deploy/tools/api_check.py`, is ready).
-- The mode-dependent pruning in `deploy/omnivla_deploy.py`: pose and image-goal modes use the same code path and
-  pruning as before, so `deploy/tools/reference_check.py` should still match bit for bit, but it has not been rerun.
-- Power and energy per inference (`eval/jetson/run_power_sweep.sh` is ready).
+- Language-mode accuracy on the Jetson: the object-goal test ran on a Kaggle GPU with the same weights.
+- The system-changing steps of `setup_jetson.sh` (headless boot, swap, sudoers) on a fresh Jetson: the end-to-end test
+  runs with `--no-system` on a Jetson where they were already done.
 
 ## Requirements
 
@@ -198,10 +214,13 @@ Tests that run anywhere (also in CI): `python -m unittest discover -s tests`, `d
   check.
 - Language modes run without image-token pruning to keep object-goal accuracy at the full-precision level (84% vs 69%
   with pruning, [results/lelan_summary.md](results/lelan_summary.md)). They are therefore slower than pose goals
-  (about 750 ms, estimated; not measured on the Jetson yet).
-- Process memory grows by 50-65 MB per 10 minutes; restart the node every ~2 hours.
+  (650-735 ms with CUDA graphs).
+- Process memory grows by 50-65 MB per 10 minutes; restart the node every ~2 hours. Latency differs by up to ~10%
+  between boots of the same Jetson (most in language mode), for an unknown reason; compare configurations within one boot.
 - Grouped Marlin (groupsize 128) gives wrong results on sm_87; only per-channel weights are used
   ([docs/marlin_sm87_bug.md](docs/marlin_sm87_bug.md)).
+- TensorRT vision encoders were tried and are not used: TensorRT 10.3 on the Orin turns the DINOv2 encoder into an
+  engine with wrong outputs ([docs/tensorrt_dinov2_issue.md](docs/tensorrt_dinov2_issue.md)).
 - The rover's servo channel map differs between hardware versions. Test on a bench with the wheels off the ground first.
 
 ## Credit and citation

@@ -11,6 +11,8 @@
 # predictions (eval/demo/seq_demo_inputs.py); both npz files go in a private dataset <you>/omnivla-lelan-demo-inputs.
 # LANG_TEST=ablation (~0.8 GPU-hour): object-goal test for the pruning ablation: fp16 with 75% pruning (no quantization),
 # then the deployed int4 weights (GPTQ calibrated as built) evaluated with 0%, 50% and 75% image-token pruning.
+# LANG_TEST=promptprune (~0.7 GPU-hour): object-goal test with prompt-aware pruning (deploy/prompt_prune.py) at 25/50/75%
+# with the fine-tuned SigLIP, 75% with the original SigLIP image tower, and uniform 25%; deployed int4 weights.
 set -euo pipefail
 LANG_TEST="${LANG_TEST:-lang}"
 HERE="$(cd "$(dirname "$0")" && pwd)"; ROOT="$(cd "$HERE/../.." && pwd)"
@@ -45,9 +47,14 @@ assert same == len(g) == 224, "int4 weights differ from the deployment"'''
 cells = [("markdown", "# OmniVLA language-goal test (CAST) and deployed int4 config on all driving tests"),
          ("code", "!nvidia-smi --query-gpu=name,memory.total --format=csv\n!pip install -q " + pins +
                   "\n!TORCH_CUDA_ARCH_LIST=8.7 MAX_JOBS=4 pip install -q --no-build-isolation git+https://github.com/IST-DASLab/marlin.git@1f25790")]
-for f in ("build/kaggle_compress.py", "build/tensor_hashes.py", "build/reference_tensor_hashes.json"):
+if test == "promptprune":                                    # SigLIP text tower (open_clip 2.24.0 keeps timm 0.9.10)
+    cells.append(("code", "!pip install -q --no-deps open_clip_torch==2.24.0 && pip install -q ftfy regex"))
+for f in ("build/kaggle_compress.py", "build/tensor_hashes.py", "build/reference_tensor_hashes.json", "deploy/prompt_prune.py"):
     cells.append(("code", f"%%writefile /kaggle/working/{os.path.basename(f)}\n" + open(os.path.join(root, f)).read()))
-if test == "ablation":
+if test == "promptprune":
+    cells += [("code", run("STUDY=gptqx PRUNE=spatial75 N_CALIB=64 TESTS_ONLY=lelan BLIND=none,blank,shuffled,lang_shuffled "
+                           "BLIND_TESTS=lelan EVAL_PRUNES=spatial25,prompt25,prompt50,prompt75,promptorig75 OUT_SUFFIX=_promptprune"))]
+elif test == "ablation":
     cells += [("code", run("STUDY=lelan_p75 PRUNE=spatial75 TESTS_ONLY=lelan")),
               ("code", run("STUDY=gptqx PRUNE=spatial75 N_CALIB=64 TESTS_ONLY=lelan BLIND=none,blank,shuffled,lang_shuffled "
                            "BLIND_TESTS=lelan EVAL_PRUNES=none,spatial50,spatial75 OUT_SUFFIX=_ablation"))]
@@ -66,7 +73,7 @@ json.dump(nb, open(f"{kdir}/{slug}.ipynb", "w"), indent=1)
 json.dump({"id": f"{user}/{slug}", "title": slug, "code_file": f"{slug}.ipynb", "language": "python", "kernel_type": "notebook",
            "is_private": True, "enable_gpu": True, "enable_tpu": False, "enable_internet": True,
            "dataset_sources": [os.environ.get("KAGGLE_DATASET", f"{user}/omnivla-frodobots-frames")]
-                              + ([f"{user}/omnivla-lelan-demo-inputs"] if test in ("lelan", "ablation") else []), "competition_sources": [],
+                              + ([f"{user}/omnivla-lelan-demo-inputs"] if test in ("lelan", "ablation", "promptprune") else []), "competition_sources": [],
            "kernel_sources": [f"{user}/omnivla-cast-extract"] if test == "lang" else [], "machine_shape": "NvidiaTeslaT4"}, open(f"{kdir}/kernel-metadata.json", "w"), indent=1)
 PY
 

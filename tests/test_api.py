@@ -32,7 +32,7 @@ class ReplayRuntime:
         f = self.frame
         if mode == 4:
             f = next(x for x in FRAMES if np.array_equal(REF[f"goal__{x}"], goal_pose))
-        act = REF[f"act_m{4 if mode in (4, 8) else 6}__{f}"]
+        act = REF[f"act_m{mode}__{f}"]
         return dict(actions=act, t_fwd=0.123)
 
     def warmup(self, modes=(4,), n=2):
@@ -74,6 +74,7 @@ class TestReplay(unittest.TestCase):
         self.rt.frame = FRAMES[0]
         p = self.m.predict(self.img, instruction="move toward the blue trash bin")
         self.assertEqual((p.mode, self.rt.calls[-1]["lang"]), (7, "move toward the blue trash bin"))
+        self.assertTrue(np.array_equal(p.waypoints, REF[f"act_m7__{FRAMES[0]}"]))
         g = REF[f"goal__{FRAMES[1]}"]
         p = self.m.predict(self.img, instruction="follow the path", goal_pose=g)
         c = self.rt.calls[-1]

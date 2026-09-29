@@ -291,18 +291,28 @@ def step_weights(kind, mode):
     return w / w.mean()
 
 PRUNE = os.environ.get("PRUNE", "")
+PP = dict(active=None, frac=0.0, drop=None)          # prompt-aware pruning state (deploy/prompt_prune.py)
 def apply_prune(vla, ns, spec=None):
     """deployed uniform-grid pruning of current-image tokens on top of elision. spec: "spatial<pct>", "none" (back to
-    elision only; used to change the pruning after GPTQ, EVAL_PRUNES) or None (= the PRUNE setting)"""
+    elision only; used to change the pruning after GPTQ, EVAL_PRUNES), "prompt<pct>" / "promptorig<pct>" (drop the
+    patches least similar to the instruction, scored with OmniVLA's fine-tuned / the original SigLIP image tower; needs
+    install_prompt_scoring) or None (= the PRUNE setting)"""
     spec = PRUNE if spec is None else spec
+    PP.update(active=None, drop=None)
     if spec == "none":
         vla._build_multimodal_attention_MMN = ns["build_elide"]; vla.language_model.forward = ns["lm_fwd"]
         print("[C] pruning: off (elision only)", flush=True)
         return
     if not spec:
         return
-    assert spec.startswith("spatial"), spec
-    frac, N_IMG = int(spec[7:]) / 100.0, 256
+    dyn = spec.startswith("prompt")
+    if dyn:
+        kind = "orig" if spec.startswith("promptorig") else "ft"
+        frac, N_IMG = int(spec[len("promptorig" if kind == "orig" else "prompt"):]) / 100.0, 256
+        PP.update(active=kind, frac=frac)
+    else:
+        assert spec.startswith("spatial"), spec
+        frac, N_IMG = int(spec[7:]) / 100.0, 256
     n_keep = N_IMG - int(round(N_IMG * frac))
     drop = np.setdiff1d(np.arange(N_IMG), np.unique(np.round(np.linspace(0, N_IMG - 1, n_keep)).astype(int))) + 1
     ST = {}
@@ -310,7 +320,11 @@ def apply_prune(vla, ns, spec=None):
     def build_p(inp, patches, am, aml, mid):
         emb, mask = _ob(inp, patches, am, aml, mid)
         keep = mask[0].bool().clone(); full_len = mask.shape[1]
-        keep[torch.as_tensor(drop, device=keep.device)] = False
+        if dyn:
+            assert PP["drop"] is not None, "prompt scoring did not run for this prediction"
+            keep[PP["drop"].to(keep.device)] = False; PP["drop"] = None
+        else:
+            keep[torch.as_tensor(drop, device=keep.device)] = False
         ST.update(ids=torch.arange(full_len, device=mask.device)[keep].unsqueeze(0), full=full_len)
         return emb[:, keep], mask[:, keep]
     vla._build_multimodal_attention_MMN = build_p
@@ -322,7 +336,33 @@ def apply_prune(vla, ns, spec=None):
         out.hidden_states = tuple(out.hidden_states[:-1]) + (full,)
         return out
     vla.language_model.forward = lm_fwd_p
-    print(f"[C] pruning: spatial {int(frac * 100)}% of current-image tokens (keep {n_keep})", flush=True)
+    print(f"[C] pruning: {'prompt-aware (' + PP['active'] + ')' if dyn else 'spatial'} {int(frac * 100)}% of current-image "
+          f"tokens (keep {n_keep})", flush=True)
+
+def install_prompt_scoring(vla, inf, phrases):
+    """score current-image patches against the instruction for prompt<pct> / promptorig<pct> (deploy/prompt_prune.py)"""
+    sys.path.insert(0, "/kaggle/working")
+    import prompt_prune as P
+    te = P.TextEncoder(device="cpu")                                     # text on the CPU in fp32, once
+    TXT = te.encode(sorted(set(phrases)))
+    orig = te.image_tower().half().to("cuda:0").eval()                   # original SigLIP image trunk (reference variant)
+    del te; gc.collect()
+    ff = vla.vision_backbone.fused_featurizer
+    def scores(emb):
+        t = TXT[P.object_phrase(inf.lan_inst_prompt)].to(emb.device)
+        PP["drop"] = P.drop_positions(emb, t, PP["frac"])
+    def pre(mod, args):
+        if PP["active"] == "orig" and PP["drop"] is None:
+            x = args[0].to("cuda:0", torch.float16)
+            with torch.no_grad():
+                scores(P.patch_embeddings(orig, P.penultimate(orig, x)))
+    def post(mod, args, out):
+        if PP["active"] == "ft" and PP["drop"] is None:
+            x = out[0] if isinstance(out, (tuple, list)) else out
+            with torch.no_grad():
+                scores(P.patch_embeddings(ff, x))
+    ff.register_forward_pre_hook(pre); ff.register_forward_hook(post)
+    print(f"[C] prompt scoring ready: {len(TXT)} phrases, SigLIP text tower timm/ViT-SO400M-14-SigLIP", flush=True)
 
 def llm_linears(vla):
     return [(n, m) for n, m in vla.named_modules() if n.startswith("language_model.model.layers.") and isinstance(m, torch.nn.Linear)]
@@ -844,6 +884,9 @@ def run(cfg):
         print(f"[G] exported {len(out)} Marlin layers | files {man['files']}", flush=True)
         del out
         if os.environ.get("EVAL_PRUNES"):                     # same weights, several pruning levels (ablation)
+            if any(x.startswith("prompt") for x in os.environ["EVAL_PRUNES"].split(",")):
+                LMm = json.loads(str(np.load(glob.glob("/kaggle/input/**/lelan_lang.npz", recursive=True)[0])["meta"]))
+                install_prompt_scoring(vla, inf, [LMm[k]["target"] for k in LMm] + [LMm[k]["distractor"] for k in LMm])
             for spec in os.environ["EVAL_PRUNES"].split(","):
                 apply_prune(vla, ns, spec); tag = f"gptqx_pc4_{spec}"
                 lat.clear(); eval_tests(tag)

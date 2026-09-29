@@ -22,7 +22,8 @@ Terms used in the tables:
 | lelan_summary.md | object-goal language test on LeLaN (in-distribution): controls, bf16 / int4 / OmniVLA-edge, pruning ablation |
 | edge_vs_7b.md | OmniVLA-7B int4 vs OmniVLA-edge: accuracy on every test, Jetson latency and memory |
 | edge_jetson.md | OmniVLA-edge latency and memory on the Jetson (earlier measurement, provenance inside) |
-| power_summary.md | power and energy per inference at 15W / 25W / MAXN_SUPER (pending a Jetson run) |
+| power_summary.md | power and energy per inference on the Jetson, per power mode |
+| jetson_validation_2026-09-28.md | on-device checks: reference outputs, language-mode latency and memory, Python package, setup |
 | verify_summary.md | 4-bit vs full-precision reference, per condition |
 | refresh_summary.md | goal key/value reuse: error vs refresh interval |
 | cache_summary.md | temporal reuse between frames (goal cache, VLA-Cache style, ViT patch reuse) |
