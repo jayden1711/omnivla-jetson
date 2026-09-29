@@ -11,11 +11,12 @@ from omnivla_deploy import OmniVLADeploy
 from omnivla_jetson import OmniVLAJetson
 
 REF = os.path.join(D, "tests", "reference")
-R = np.load(os.path.join(REF, "reference.npz"))
+m = OmniVLAJetson(os.path.join(D, os.environ.get("OMNIVLA_WEIGHTS", "weights")))
+# reference.npz = Marlin vision (default); reference_hqq4.npz = HQQ4 vision (fallback), as in reference_check.py
+R = np.load(os.path.join(REF, "reference.npz" if m.runtime.vision_kernel == "marlin" else "reference_hqq4.npz"))
 frames = sorted(k[6:] for k in R.files if k.startswith("goal__"))
 if not all(os.path.exists(os.path.join(REF, s, f + ".jpg")) for s in ("frames", "goals") for f in frames):
     sys.exit("[API] reference images missing: run ./launch.sh tools/reference_check.py first (it downloads them)")
-m = OmniVLAJetson(os.path.join(D, os.environ.get("OMNIVLA_WEIGHTS", "weights")))
 m.warmup(modes=(4, 6, 7, 8))
 n = exact = 0
 for f in frames:

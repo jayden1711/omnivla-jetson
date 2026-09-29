@@ -1,0 +1,22 @@
+{
+ "note": "Online-footage demo (eval/demo/online_frames.py, eval/jetson/online_demo.py, eval/demo/render_online_demo.py). Clips from Wikimedia Commons; license, author and URL per clip. Segments and instructions chosen by looking at the footage (objects that are in view), before any model run.",
+ "clips": {
+  "canada_water": {"file": "Canada Water and Rafter Walk in Southwark, London Docklands.webm",
+                   "url": "https://commons.wikimedia.org/wiki/File:Canada_Water_and_Rafter_Walk_in_Southwark,_London_Docklands.webm",
+                   "author": "Acabashi", "license": "CC BY-SA 4.0", "license_url": "https://creativecommons.org/licenses/by-sa/4.0/"},
+  "tampere": {"file": "A Walk Through the Rongankatu Underpass, Tampere.webm",
+              "url": "https://commons.wikimedia.org/wiki/File:A_Walk_Through_the_Rongankatu_Underpass,_Tampere.webm",
+              "author": "Laura Vaara (Sounds of Changes)", "license": "CC BY 3.0", "license_url": "https://creativecommons.org/licenses/by/3.0/"},
+  "munich_cellar": {"file": "Walk through a seemingly endless cellar below an appartment block in Munich, Germany.webm",
+                    "url": "https://commons.wikimedia.org/wiki/File:Walk_through_a_seemingly_endless_cellar_below_an_appartment_block_in_Munich,_Germany.webm",
+                    "author": "Pittigrilli", "license": "CC0 1.0", "license_url": "https://creativecommons.org/publicdomain/zero/1.0/"}
+ },
+ "segments": [
+  {"id": "cw_building", "clip": "canada_water", "start": 0.0, "end": 24.0, "mode": 7, "lang": "move toward the tall building"},
+  {"id": "cw_fence", "clip": "canada_water", "start": 27.0, "end": 36.0, "mode": 7, "lang": "move toward the red fence"},
+  {"id": "tp_person", "clip": "tampere", "start": 6.0, "end": 15.0, "mode": 7, "lang": "move toward the person"},
+  {"id": "tp_goal", "clip": "tampere", "start": 24.0, "end": 45.0, "mode": 6, "goal_time": 45.0},
+  {"id": "mc_door", "clip": "munich_cellar", "start": 72.0, "end": 84.0, "mode": 7, "lang": "move toward the door"},
+  {"id": "mc_bicycle", "clip": "munich_cellar", "start": 96.0, "end": 105.0, "mode": 7, "lang": "move toward the bicycle"}
+ ]
+}

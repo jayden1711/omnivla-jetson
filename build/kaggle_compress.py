@@ -2,7 +2,8 @@
 # STUDY: limit (bit-width sweep) | tests (real-driving tests, incl. blind controls) | sens (per-component 2-bit
 # sensitivity) | teacher (bf16 labels on held-out samples) | lora (low-bit + rank-16 correction) | wanda (2:4 pruning) |
 # exq (GPTQ/ActQuant calibration and step weighting) | a8 (simulated activation quantization) | gptqx (GPTQ int4 export
-# for Marlin, used by build/kaggle_build.py) | lang (CAST language-goal test, eval/data/cast_extract.py).
+# for Marlin, used by build/kaggle_build.py) | lang (CAST language-goal test, eval/data/cast_extract.py) | vismarlin
+# (deployed GPTQ LLM + vision linears as Marlin per-channel int4: RTN / GPTQ, all or SigLIP MLP only; exports packed weights).
 # Output: /kaggle/working/compress_<STUDY>.npz, keys "<cfg>__m<mode>__<frame>".
 import gc, glob, json, math, os, shutil, sys, tarfile, time
 import numpy as np
@@ -10,7 +11,10 @@ import torch
 
 STUDY = os.environ.get("STUDY", "limit")
 OUT = f"/kaggle/working/compress_{STUDY}{os.environ.get('OUT_SUFFIX', '')}.npz"
-WORK, MODEL_DIR = "/tmp/omni", "/tmp/omnivla-original"
+MODEL_ID = os.environ.get("MODEL_ID", "NHirose/omnivla-original")          # castgptq: NHirose/omnivla-finetuned-cast
+MODEL_REV = os.environ.get("MODEL_REV") or None
+HEAD_STEP = int(os.environ.get("HEAD_STEP", "120000"))                       # action head / pose projector checkpoint step
+WORK, MODEL_DIR = "/tmp/omni", f"/tmp/{MODEL_ID.split('/')[-1]}"
 MODES = {7: dict(lan_prompt=True), 4: dict(pose_goal=True), 8: dict(lan_prompt=True, pose_goal=True), 6: dict(image_goal=True)}
 
 # ---------------- setup ----------------
@@ -25,7 +29,7 @@ if not os.path.exists(f"{WORK}/prismatic"):
             t.extractall(WORK)
 os.chdir(WORK); sys.path.insert(0, WORK)
 from huggingface_hub import snapshot_download
-snapshot_download("NHirose/omnivla-original", local_dir=MODEL_DIR, ignore_patterns=["dist_head*", "lora_adapter/*", "modeling_prismatic_____.py"])
+snapshot_download(MODEL_ID, revision=MODEL_REV, local_dir=MODEL_DIR, ignore_patterns=["dist_head*", "lora_adapter/*", "modeling_prismatic_____.py"])
 import utm
 from PIL import Image
 import inference.run_omnivla as R
@@ -74,6 +78,10 @@ if tz:
                              img=lambda k: Image.fromarray(CZ[f"img__{k}"]).resize((224, 224)),
                              shuf={k: v["img_shuffle"] for k, v in CM.items()}, lang=lambda k: CM[k]["instruction"],
                              lshuf={k: v["lang_shuffle"] for k, v in CM.items()})
+        if os.environ.get("CAST_SPLIT"):               # castgptq: held-out episodes only; calibration from the other side
+            SPL = json.load(open(os.environ["CAST_SPLIT"]))
+            assert not set(SPL["calibration"]) & set(SPL["heldout"])
+            TESTS["lang"]["frames"] = [k for k in SPL["heldout"] if k in CM]; CAST_CAL = SPL["calibration"]
     lz = glob.glob("/kaggle/input/**/lelan_lang.npz", recursive=True)
     if lz:                                             # object goal (LeLaN); lang_shuffled = the other object's prompt
         LZ = np.load(lz[0]); LM = json.loads(str(LZ["meta"]))
@@ -160,7 +168,7 @@ if _hz:
     HO = {k[6:]: dict(goal=_h[k].astype(np.float64), img=f"{_hdir}/{k[6:]}.jpg", gimg=f"{_gdir}/{k[6:]}.jpg")
           for k in _h.files if k.startswith("goal__")}
     print(f"[C] held-out samples: {len(HO)}", flush=True)
-if STUDY in ("teacher", "lora", "wanda", "exq", "a8", "gptqx") and not HO:
+if STUDY in ("teacher", "lora", "wanda", "exq", "a8", "gptqx", "vismarlin", "visgptqx") and not HO:
     print("[C] input listing:", sorted(glob.glob("/kaggle/input/**/*.np*", recursive=True))[:20], flush=True)
     raise SystemExit("held-out data missing from the attached dataset version")
 
@@ -372,6 +380,10 @@ def set_sample(k, m, CUR, MODE, E):
     for k2, v2 in MODES[m].items():
         setattr(R, k2, v2)
     MODE["id"] = m; E["on"] = True; E["skip_img"] = m != 6
+    if k.startswith("cast"):                                   # CAST calibration sample (language mode, castgptq)
+        CUR["img"] = Image.fromarray(CZ[f"img__{k}"]).resize((224, 224)); CUR["goal"] = CUR["gimg"] = None
+        CUR["lang"] = CM[k]["instruction"]
+        return
     CUR["img"] = Image.open(HO[k]["img"]).convert("RGB"); CUR["goal"] = HO[k]["goal"] if m == 4 else None
     CUR["gimg"] = Image.open(HO[k]["gimg"]).convert("RGB") if m == 6 else None
 
@@ -430,7 +442,7 @@ def col_w(B_n, B0_n, kind):
 def q_pc4(w, s):                               # Marlin per-channel convention: q in 0..15, zero 8
     return (torch.clamp(torch.round(w / s) + 8, 0, 15) - 8) * s
 
-def gptq(W, H, fmt, blocksize=128, percdamp=0.01, gs=32):
+def gptq(W, H, fmt, blocksize=128, percdamp=0.01, gs=32, ret_scale=False):
     """GPTQ (Frantar et al. 2023), column-wise error feedback with the (optionally token-weighted) Hessian H."""
     W = W.float().clone(); H = H.clone(); n = W.shape[1]
     assert torch.isfinite(H).all(), "non-finite Hessian"
@@ -459,7 +471,7 @@ def gptq(W, H, fmt, blocksize=128, percdamp=0.01, gs=32):
             Err1[:, i] = err
         Q[:, i1:i2] = Q1
         W[:, i2:] -= Err1 @ Hinv[i1:i2, i2:]
-    return Q
+    return (Q, s) if ret_scale else Q        # pc4: s comes from W AFTER dead input columns were zeroed
 
 def actq(W, b, fmt, iters=8, gs=32):
     """ActQuant-style intra-tensor scale optimization (Akbari et al. 2026): weighted least squares for the scales with
@@ -534,6 +546,7 @@ def capture_layer0(vla, inf, CUR, MODE, E, calib):
     h.remove()
     return store
 
+LLM_SC = {}                                        # pc4 scale GPTQ used per LLM linear (export must use the same)
 def gptq_model(vla, inps, S, calib, kind, fmt, DT):
     """sequential GPTQ over the 32 decoder layers; H_n = sum_i sum_t w_t x_t x_t^T with w_t = token_w(kind)"""
     layers = vla.language_model.model.layers
@@ -558,7 +571,11 @@ def gptq_model(vla, inps, S, calib, kind, fmt, DT):
         for h_ in hooks:
             h_.remove()
         for n, m in lin:
-            m.weight.data = gptq(m.weight.data, H[n], fmt).to(m.weight.dtype)
+            if fmt == "pc4":
+                Q, sc_ = gptq(m.weight.data, H[n], fmt, ret_scale=True); LLM_SC[pref + n] = sc_.half().cpu()
+            else:
+                Q = gptq(m.weight.data, H[n], fmt)
+            m.weight.data = Q.to(m.weight.dtype)
         del H
         with torch.no_grad(), torch.autocast("cuda", dtype=DT):              # quantized outputs -> next layer inputs
             new = []
@@ -688,6 +705,96 @@ def a8_model(vla, sub, cmax, ratio, DT):
         parent = vla.get_submodule(n.rsplit(".", 1)[0]); setattr(parent, n.rsplit(".", 1)[1], w); undo.append((parent, n.rsplit(".", 1)[1], m))
     return undo, len(excl)
 
+
+# ---------------- vision linears as Marlin per-channel int4 (STUDY=vismarlin) ----------------
+# Marlin needs k % 128 == 0 and n % 256 == 0. DINOv2 shapes fit; SigLIP's do not (qkv n 3456, proj n 1152, MLP fc1 n 4304,
+# fc2 k 4304 / n 1152), so weights are zero-padded: padded output rows are computed and sliced off, padded input columns
+# have zero weights (q = 8, i.e. exactly 0 after dequantization) and meet zero-padded activations. The real outputs get
+# only exact zero products added. Per-channel only (groupsize=-1): grouped Marlin is wrong on sm_87.
+def vis_names(vla):
+    return [n for n, m in vla.named_modules() if n.startswith("vision_backbone.") and ".blocks." in n
+            and type(m).__name__ in ("HQQLinear", "Linear")]
+
+def load_ckpt(keys):
+    from safetensors import safe_open
+    want, out = set(keys), {}
+    for f in sorted(glob.glob(f"{MODEL_DIR}/*.safetensors")):
+        with safe_open(f, "pt", device="cpu") as fh:
+            for k in fh.keys():
+                if k in want:
+                    out[k] = fh.get_tensor(k)
+    missing = sorted(want - set(out))
+    assert not missing, f"checkpoint keys missing: {missing[:3]}"
+    return out
+
+def pc4_scale(W0):                                            # per output channel, fp16, same rule as the LLM (gptq pc4)
+    return (W0.float().abs().amax(1, keepdim=True) * 2 / 15).clamp(min=1e-8).half()
+
+def vis_gptq(vla, keys, DT, imgs=None):
+    """sequential (block by block) GPTQ pc4 of the vision linears; calibration = current + goal images of held-out samples"""
+    vb, t0, SC = vla.vision_backbone, time.time(), {}
+    if imgs is None:
+        imgs = [Image.open(HO[k][w]).convert("RGB") for k in keys for w in ("img", "gimg")]
+    px = [processor.image_processor.apply_transform(im) for im in imgs]
+    for enc, sl in ((vb.featurizer, slice(0, 3)), (vb.fused_featurizer, slice(3, 6))):
+        dev = next(enc.parameters()).device
+        with torch.no_grad(), torch.autocast("cuda", dtype=DT):
+            X = [enc.norm_pre(enc.patch_drop(enc._pos_embed(enc.patch_embed(p[sl][None].to(dev, DT))))) for p in px]
+        for bi, blk in enumerate(enc.blocks):
+            lin = [(n, m) for n, m in blk.named_modules() if isinstance(m, torch.nn.Linear)]
+            assert len(lin) == 4, [n for n, _ in lin]
+            H = {}
+            def acc(mod, a, out, n=None):
+                x = a[0].reshape(-1, a[0].shape[-1]).float()
+                with torch.autocast("cuda", enabled=False):
+                    Hn = x.T @ x
+                H[n] = Hn if n not in H else H[n] + Hn
+            hooks = [m.register_forward_hook(lambda mod, a, out, n=n: acc(mod, a, out, n)) for n, m in lin]
+            with torch.no_grad(), torch.autocast("cuda", dtype=DT):
+                for x in X:
+                    blk(x)
+            for h_ in hooks:
+                h_.remove()
+            for n, m in lin:
+                Q, sc_ = gptq(m.weight.data, H[n], "pc4", ret_scale=True)
+                m.weight.data = Q.to(m.weight.dtype); SC[m] = sc_.half().cpu()
+            del H
+            with torch.no_grad(), torch.autocast("cuda", dtype=DT):
+                X = [blk(x) for x in X]
+        print(f"[V] vision GPTQ {type(enc).__name__} {len(enc.blocks)} blocks | {time.time() - t0:.0f} s", flush=True)
+    del X; torch.cuda.empty_cache()
+    names = {m: n for n, m in vla.named_modules()}
+    return {names[m]: v for m, v in SC.items()}                 # module name -> per-channel scale GPTQ used
+
+def export_vis(tag, W, CK, names, scales=None):
+    """pack fp16 fake-quantized weights W[name] (on the pc4 grid of the ORIGINAL weights' scales) into padded Marlin
+    layers; manifest with sha256 of the unpadded W^T fp16 per layer (what a dequantize-then-matmul reference uses)"""
+    import hashlib, marlin
+    out, sums, chk, t0 = {}, {}, {}, time.time()
+    CHECKV = [n for n in names if ".blocks.0." in n or ".blocks.13." in n]
+    for n in names:
+        Wq = W[n].detach().cpu().half(); sc = scales[n] if scales is not None else pc4_scale(CK[n + ".weight"])
+        q = torch.round(Wq.float() / sc.float()) + 8
+        assert q.min() >= 0 and q.max() <= 15, n
+        assert torch.equal(((q - 8) * sc.float()).half(), Wq), f"weights not on the Marlin grid: {n}"
+        o, i = Wq.shape; kp, np_ = -(-i // 128) * 128, -(-o // 256) * 256
+        Wp = torch.zeros(np_, kp, dtype=torch.float16); Wp[:o, :i] = Wq
+        sp = torch.ones(np_, 1, dtype=torch.float16); sp[:o] = sc
+        fq = torch.nn.Linear(kp, np_, bias=False, dtype=torch.float16); fq.weight.data = Wp
+        L = marlin.Layer(kp, np_, groupsize=-1); L.pack(fq, sp)
+        b = CK.get(n + ".bias")
+        out[n] = {"marlin_B": L.B.clone(), "marlin_s": L.s.clone(), "k": i, "n": o, "kp": kp, "np": np_,
+                  "bias": None if b is None else b.detach().half().clone()}
+        sums[n] = hashlib.sha256(Wq.T.contiguous().numpy().tobytes()).hexdigest()
+        if n in CHECKV:                                        # reference weights + scales for the Jetson gate
+            chk[n] = Wq; chk[n + ".scale"] = sc; chk[n + ".bias"] = None if b is None else b.detach().half().clone()
+    f1, f2 = f"prequant_vis_{tag}.pt", f"prequant_vis_{tag}_check.pt"
+    torch.save(out, f"/kaggle/working/{f1}"); torch.save(chk, f"/kaggle/working/{f2}")
+    man = {"deq_sha256_WT_fp16": sums, "padding": {n: [v["np"], v["kp"]] for n, v in out.items() if (v["np"], v["kp"]) != (v["n"], v["k"])},
+           "files": {f: hashlib.sha256(open(f"/kaggle/working/{f}", "rb").read()).hexdigest() for f in (f1, f2)}}
+    json.dump(man, open(f"/kaggle/working/prequant_vis_{tag}_manifest.json", "w"), indent=1)
+    print(f"[V] exported {len(out)} vision Marlin layers ({tag}; {len(man['padding'])} padded) in {time.time() - t0:.0f} s", flush=True)
+
 # ---------------- evaluation ----------------
 def run(cfg):
     name = cfg["name"]
@@ -706,7 +813,7 @@ def run(cfg):
     ns = {"vla": vla, "torch": torch}; exec(ELIDE_SRC, ns); E = ns["E"]
     apply_prune(vla, ns)
     dev = torch.device("cuda:0")
-    rc = R.InferenceConfig(); rc.vla_path = MODEL_DIR
+    rc = R.InferenceConfig(); rc.vla_path = MODEL_DIR; rc.resume_step = HEAD_STEP
     pp = R.init_module(R.ProprioProjector, "pose_projector", rc, dev, {"llm_dim": vla.llm_dim, "proprio_dim": POSE_DIM})
     ah = R.init_module(R.L1RegressionActionHead_idcat, "action_head", rc, dev,
                        {"input_dim": vla.llm_dim, "hidden_dim": vla.llm_dim, "action_dim": ACTION_DIM}, to_bf16=True).to(DT)
@@ -754,7 +861,7 @@ def run(cfg):
     CUR = {"img": None, "goal": None, "gimg": None}
     _dt = inf.data_transformer_omnivla
     def _wrap(cur, lan, gimg, gpose, *a, **k):
-        return _dt(CUR["img"], lan, CUR["gimg"] if CUR["gimg"] is not None else gimg,
+        return _dt(CUR["img"], CUR.get("lang") or lan, CUR["gimg"] if CUR["gimg"] is not None else gimg,
                    CUR["goal"] if CUR["goal"] is not None else gpose, *a, **k)
     inf.data_transformer_omnivla = _wrap
     if cfg.get("wanda"):
@@ -849,21 +956,30 @@ def run(cfg):
                 for n, m in llm_linears(vla):
                     m.weight.data = snap[n].to(m.weight.device)
         frames_loop = ()
-    elif cfg.get("gptqx"):                                        # GPTQ per-channel int4 export for deployment (Marlin format)
+    elif cfg.get("gptqx") or cfg.get("vismarlin") or cfg.get("castgptq"):   # GPTQ per-channel int4 export (Marlin format)
         import hashlib, marlin
         keys = sorted(HO)[: int(os.environ.get("N_CALIB", "64"))]
         calib = [(k, m) for k in keys for m in (4, 6)]
+        if cfg.get("castgptq"):                                  # language mode (7) only, CAST calibration episodes
+            keys = CAST_CAL[: int(os.environ.get("N_CALIB", "64"))]; calib = [(k, 7) for k in keys]
+            VN = vis_names(vla); assert len(VN) == 204, len(VN)
+            CK = {k: v.half() for k, v in load_ckpt([n + ".weight" for n in VN] + [n + ".bias" for n in VN]).items()}
+            SCG = vis_gptq(vla, None, DT, imgs=[Image.fromarray(CZ[f"img__{k}"]).resize((224, 224)) for k in keys])
+            if not os.environ.get("NO_EXPORT"):
+                export_vis("cast_gptq", {n: vla.get_submodule(n).weight.data for n in VN}, CK, VN, SCG)
         snap = {n: m.weight.data.cpu().clone() for n, m in llm_linears(vla)}
         t1 = time.time()
         inps0 = capture_layer0(vla, inf, CUR, MODE, E, calib)
+        CUR["lang"] = None                                       # back to the per-test instructions
         gptq_model(vla, inps0, None, calib, "plain", "pc4", DT)
         print(f"[G] GPTQ done in {time.time() - t1:.0f} s", flush=True)
+        skip_export = bool(cfg.get("castgptq") and os.environ.get("NO_EXPORT"))   # smoke run: no packing
         out, sums, chk = {}, {}, {}
         CHECKL = ["language_model.model.layers.0.self_attn.q_proj", "language_model.model.layers.15.mlp.up_proj",
                   "language_model.model.layers.31.mlp.down_proj"]
-        for n, m in llm_linears(vla):
+        for n, m in ([] if skip_export else llm_linears(vla)):
             Wo = snap[n].float()
-            sc = (Wo.abs().amax(1, keepdim=True) * 2 / 15).clamp(min=1e-8).half()          # the scale GPTQ used (static)
+            sc = LLM_SC.get(n, (Wo.abs().amax(1, keepdim=True) * 2 / 15).clamp(min=1e-8).half())   # the scale GPTQ used
             Wq = m.weight.data.detach().cpu().half()                                        # fp16 dequantized GPTQ weights
             q = torch.round(Wq.float() / sc.float()) + 8
             assert q.min() >= 0 and q.max() <= 15, n
@@ -876,14 +992,60 @@ def run(cfg):
             sums[n] = hashlib.sha256(ref.T.contiguous().numpy().tobytes()).hexdigest()   # W^T fp16, as Marlin(I) returns it
             if n in CHECKL:
                 chk[n] = ref
-        torch.save(out, "/kaggle/working/prequant_marpcg.pt"); torch.save(chk, "/kaggle/working/prequant_marpcg_check.pt")
+        XT = os.environ.get("EXPORT_TAG", "")                  # castgptq: _cast (different weights, different files)
+        if skip_export:
+            XT = "_smoke"
+        torch.save(out, f"/kaggle/working/prequant_marpcg{XT}.pt"); torch.save(chk, f"/kaggle/working/prequant_marpcg{XT}_check.pt")
         man = {"deq_sha256_WT_fp16": sums, "files": {f: hashlib.sha256(open(f"/kaggle/working/{f}", "rb").read()).hexdigest()
-               for f in ("prequant_marpcg.pt", "prequant_marpcg_check.pt")}, "n_calib": len(calib), "prune": PRUNE,
-               "calib_keys_first": keys[:3]}
-        json.dump(man, open("/kaggle/working/prequant_marpcg_manifest.json", "w"), indent=1)
+               for f in (f"prequant_marpcg{XT}.pt", f"prequant_marpcg{XT}_check.pt")}, "n_calib": len(calib), "prune": PRUNE,
+               "calib_keys_first": keys[:3], "model": MODEL_ID, "model_rev": MODEL_REV, "head_step": HEAD_STEP}
+        json.dump(man, open(f"/kaggle/working/prequant_marpcg{XT}_manifest.json", "w"), indent=1)
         print(f"[G] exported {len(out)} Marlin layers | files {man['files']}", flush=True)
         del out
-        if os.environ.get("EVAL_PRUNES"):                     # same weights, several pruning levels (ablation)
+        if cfg.get("vismarlin"):                              # vision variants on top of the deployed int4 LLM
+            global TESTS
+            ALL_T = TESTS
+            def eval_split(tag):                              # deployed pruning per mode: image goal 75%, language none
+                global TESTS
+                for tname, spec in (("img3m", "spatial75"), ("lelan", "none")):
+                    if tname in ALL_T:
+                        TESTS = {tname: ALL_T[tname]}; apply_prune(vla, ns, spec)
+                        lat.clear(); eval_tests(tag)
+                TESTS = ALL_T
+                res[f"meta__{tag}"] = np.array(json.dumps(dict(name=tag, t4_latency_s=float(np.mean(lat)) if lat else None)))
+                np.savez(OUT, **res)
+            VN = vis_names(vla); assert len(VN) == 204, len(VN)
+            ORIGV = {n: vla.get_submodule(n) for n in VN}                   # HQQ4 vision as deployed
+            # fp16 like the model (build() loads fp16): GPTQ, RTN and the export must all see the same weights and scales
+            CK = {k: v.half() for k, v in load_ckpt([n + ".weight" for n in VN] + [n + ".bias" for n in VN]).items()}
+            def put(n, mod):
+                setattr(vla.get_submodule(n.rsplit(".", 1)[0]), n.rsplit(".", 1)[1], mod)
+            def lin(n, W):
+                dev_ = torch.device(ORIGV[n].device) if hasattr(ORIGV[n], "device") else next(ORIGV[n].parameters()).device
+                o, i = W.shape; m_ = torch.nn.Linear(i, o, bias=True, dtype=DT, device=dev_)
+                m_.weight.data = W.to(dev_, DT); m_.bias.data = CK[n + ".bias"].to(dev_, DT)
+                return m_
+            RTN = {n: q_pc4(CK[n + ".weight"].float(), pc4_scale(CK[n + ".weight"]).float()).half() for n in VN}
+            MLP = [n for n in VN if n.startswith("vision_backbone.fused_featurizer.") and ".mlp.fc" in n]
+            print(f"[V] vision linears {len(VN)} (SigLIP MLP {len(MLP)})", flush=True)
+            eval_split("vm_base_hqq4")
+            for n in VN:
+                put(n, lin(n, RTN[n]))
+            eval_split("vm_rtn_all")
+            for n in VN:
+                if n not in MLP:
+                    put(n, ORIGV[n])
+            eval_split("vm_rtn_mlp")
+            for n in VN:                                                    # original fp16 weights -> GPTQ
+                put(n, lin(n, CK[n + ".weight"].half()))
+            keys_v = sorted(HO)[: int(os.environ.get("N_CALIB", "64"))]
+            SCG = vis_gptq(vla, keys_v, DT)
+            GW = {n: vla.get_submodule(n).weight.data for n in VN}
+            eval_split("vm_gptq_all")
+            del ORIGV; gc.collect(); torch.cuda.empty_cache()
+            export_vis("gptq", GW, CK, VN, SCG); del GW
+            export_vis("rtn", RTN, CK, VN)
+        elif os.environ.get("EVAL_PRUNES"):                   # same weights, several pruning levels (ablation)
             if any(x.startswith("prompt") for x in os.environ["EVAL_PRUNES"].split(",")):
                 LMm = json.loads(str(np.load(glob.glob("/kaggle/input/**/lelan_lang.npz", recursive=True)[0])["meta"]))
                 install_prompt_scoring(vla, inf, [LMm[k]["target"] for k in LMm] + [LMm[k]["distractor"] for k in LMm])
@@ -893,8 +1055,10 @@ def run(cfg):
                 res[f"meta__{tag}"] = np.array(json.dumps(dict(name=tag, t4_latency_s=float(np.mean(lat)), prune=spec, calib_prune=PRUNE)))
                 np.savez(OUT, **res)
         else:
-            lat.clear(); eval_tests("gptqx_pc4")
-            res["meta__gptqx_pc4"] = np.array(json.dumps(dict(name="gptqx_pc4", t4_latency_s=float(np.mean(lat)), prune=PRUNE)))
+            tag = "castgptq_pc4" if cfg.get("castgptq") else "gptqx_pc4"
+            lat.clear(); eval_tests(tag)
+            res[f"meta__{tag}"] = np.array(json.dumps(dict(name=tag, t4_latency_s=float(np.mean(lat)), prune=PRUNE,
+                                                           model=MODEL_ID, n_calib=len(calib))))
             np.savez(OUT, **res)
         frames_loop = ()
     elif cfg.get("a8"):                                           # study 7: simulated activation quantization
@@ -932,6 +1096,39 @@ def run(cfg):
                 for n, m in llm_linears(vla):
                     m.weight.data = snap[n].to(m.weight.device)
             torch.cuda.empty_cache()
+        frames_loop = ()
+    elif cfg.get("visgptqx"):                                     # vision-only GPTQ pc4 export (same as vismarlin's GPTQ)
+        VN = vis_names(vla); assert len(VN) == 204, len(VN)
+        CK = {k: v.half() for k, v in load_ckpt([n + ".weight" for n in VN] + [n + ".bias" for n in VN]).items()}
+        for n in VN:                                             # vis=None: fp16 Linear layers loaded from the checkpoint
+            assert torch.equal(vla.get_submodule(n).weight.data.cpu(), CK[n + ".weight"]), n
+        SCG = vis_gptq(vla, sorted(HO)[: int(os.environ.get("N_CALIB", "64"))], DT)
+        export_vis("gptq", {n: vla.get_submodule(n).weight.data for n in VN}, CK, VN, SCG)
+        lat.append(0.0)
+        frames_loop = ()
+    elif cfg.get("t4lat"):                                       # latency of the unmodified pipeline on this GPU
+        nt = 6 if SMOKE else 23                                  # 3 warm-up + timed predictions per mode
+        for elide in (False, True):                              # False = OmniVLA as released (all tokens); True = elision
+            for tname in ("pose5", "img3m", "lelan"):
+                T = TESTS[tname]; m = T["mode"]
+                R.satellite = R.lan_prompt = R.pose_goal = R.image_goal = False
+                for k2, v2 in MODES[m].items():
+                    setattr(R, k2, v2)
+                MODE["id"] = m; E["on"] = elide; E["skip_img"] = m != 6
+                ts = []
+                for i, f in enumerate(T["frames"][:nt]):
+                    CUR["img"] = T["img"](f) if "img" in T else Image.open(f"./frames/{f}.jpg").convert("RGB")
+                    CUR["goal"] = T["goal"](f) if T["goal"] else None
+                    CUR["gimg"] = Image.open(T["gimg"](f)).convert("RGB") if T["gimg"] else None
+                    if "lang" in T:
+                        inf.lan_inst_prompt = T["lang"](f)
+                    torch.cuda.synchronize(); t1 = time.time(); inf.run_omnivla(); torch.cuda.synchronize()
+                    if i >= 3:
+                        ts.append((CAP["t"], time.time() - t1))
+                res[f"lat__{'elide' if elide else 'released'}__{tname}"] = np.array(ts)
+                print(f"[T4LAT] {'elision' if elide else 'as released'} {tname} (mode {m}): model {np.median([a for a, _ in ts]) * 1000:.0f} ms"
+                      f" | whole call {np.median([b for _, b in ts]) * 1000:.0f} ms | {torch.cuda.get_device_name(0)} x{torch.cuda.device_count()}", flush=True)
+        lat.append(0.0)
         frames_loop = ()
     elif STUDY in ("tests", "sens", "wanda", "lora") or cfg.get("tests"):
         eval_tests(name)
@@ -1004,6 +1201,18 @@ elif STUDY == "gptqx":                                # GPTQ int4 export (deploy
     CONFIGS = [dict(name="gptqx", base="fp16", llm=None, vis=4, group=G2, gptqx=True)]
     if os.environ.get("BLIND"):
         CONFIGS[0]["blind"] = [None if b == "none" else b for b in os.environ["BLIND"].split(",")]
+elif STUDY == "vismarlin":                            # deployed GPTQ LLM (hash-checked) + vision Marlin pc4 variants
+    CONFIGS = [dict(name="vismarlin", base="fp16", llm=None, vis=4, group=G2, vismarlin=True)]
+elif STUDY == "visgptqx":                             # vision-only GPTQ pc4 export for Marlin (no LLM quantization)
+    CONFIGS = [dict(name="visgptqx", base="fp16", llm=None, vis=None, visgptqx=True)]
+elif STUDY == "castgptq":                             # omnivla-finetuned-cast: bf16 reference, then GPTQ int4 (LLM + vision)
+    BL = [None, "blank", "shuffled", "lang_shuffled"]         # language mode, no pruning, CAST held-out episodes (CAST_SPLIT)
+    CONFIGS = [dict(name="cast_bf16", base="bf16", tests=True, blind=BL),
+               dict(name="castgptq", base="fp16", llm=None, vis=None, castgptq=True, blind=BL)]
+elif STUDY == "castxm":                               # omnivla-finetuned-cast in bf16 on the non-language tests (MODEL_ID)
+    CONFIGS = [dict(name="cast_bf16", base="bf16", tests=True)]
+elif STUDY == "t4lat":                                # fp16 model as released: latency per mode on the Kaggle GPU
+    CONFIGS = [dict(name="t4lat_fp16", base="fp16", t4lat=True)]
 elif STUDY == "lelan_p75":                            # ablation: fp16 (no quantization) with PRUNE, e.g. spatial75
     CONFIGS = [dict(name=f"fp16_{PRUNE or 'none'}", base="fp16", tests=True, blind=[None, "blank", "shuffled", "lang_shuffled"])]
 elif STUDY in ("lang", "lelan"):                      # language tests: fp16 with blind controls, bf16 reference

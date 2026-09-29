@@ -61,6 +61,27 @@ and overlaid with model predictions, the driven path and text by `eval/demo/rend
 under CC BY-SA 4.0 as well, not MIT. When you share them, keep the attribution: "Contains video from FrodoBots-2K by
 FrodoBots Lab (CC BY-SA 4.0); overlays from omnivla-jetson; licensed CC BY-SA 4.0."
 
+## Demo media: `docs/media/demo_online.gif` and `docs/media/demo_online.mp4` (CC BY-SA 4.0)
+
+These two files are adaptations of three videos from Wikimedia Commons, overlaid with predictions that the deployed
+model made on a Jetson Orin Nano (`eval/jetson/online_demo.py`, `eval/demo/render_online_demo.py`):
+
+- "Canada Water and Rafter Walk in Southwark, London Docklands" by Acabashi, CC BY-SA 4.0
+  (https://creativecommons.org/licenses/by-sa/4.0/),
+  https://commons.wikimedia.org/wiki/File:Canada_Water_and_Rafter_Walk_in_Southwark,_London_Docklands.webm
+- "A Walk Through the Rongankatu Underpass, Tampere" by Laura Vaara (Sounds of Changes), CC BY 3.0
+  (https://creativecommons.org/licenses/by/3.0/),
+  https://commons.wikimedia.org/wiki/File:A_Walk_Through_the_Rongankatu_Underpass,_Tampere.webm
+- "Walk through a seemingly endless cellar below an appartment block in Munich, Germany" by Pittigrilli, CC0 1.0
+  (https://creativecommons.org/publicdomain/zero/1.0/),
+  https://commons.wikimedia.org/wiki/File:Walk_through_a_seemingly_endless_cellar_below_an_appartment_block_in_Munich,_Germany.webm
+
+Changes: excerpts were cut (segments in `eval/demo/online_demo_plan.json`), center-cropped to a square, resized,
+re-encoded without audio, and overlaid with the model's predicted path, the instruction or goal image, the measured
+latency and text. Because one source is CC BY-SA 4.0, the two files are licensed under CC BY-SA 4.0 (not MIT); the CC BY
+3.0 and CC0 sources allow this. The credits are also shown at the end of the video. When you share them, keep the
+attribution above and the license.
+
 ## Data: CAST (no license stated)
 
 The language-goal test uses the CAST dataset (https://huggingface.co/datasets/catglossop/CAST-dataset; paper

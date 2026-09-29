@@ -2,7 +2,9 @@
 # setup_jetson.sh - set up a fresh Jetson Orin Nano 8 GB (JetPack 6.2) to run the deployed OmniVLA.
 #
 #   ./setup_jetson.sh [--weights-src DIR|HOST:DIR] [--hf-repo ID] [--hf-revision REV] [--root DIR] [--venv DIR] [--repo DIR]
-#                     [--no-system | --yes] [--yes-runtime]
+#                     [--no-system | --yes] [--yes-runtime] [--cast]
+# --cast: install the omnivla-finetuned-cast weights (CAST-style instructions) into weights_cast/ instead of weights/;
+#         run them with OMNIVLA_WEIGHTS=weights_cast. Both folders can be installed side by side.
 #
 # Run from this deploy/ folder on the Jetson. Safe to rerun: every step checks first.
 # Persistent system changes (power mode, boot target, swap + fstab, page-cache helper, sudoers) are made only after
@@ -15,18 +17,23 @@
 set -uo pipefail
 DEPLOY="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 ROOT=/mnt/nvme/omnivla; VENV=""; REPO=""; WSRC=""; MODE=ask; RT=ask
-HF_REPO="${OMNIVLA_HF_REPO:-jayden1711/omnivla-7b-jetson-int4}"; HF_REV="${OMNIVLA_HF_REVISION:-81cc6dc43e067e33d08230f0434d4b9afe480666}"
+HF_REPO="${OMNIVLA_HF_REPO:-jayden1711/omnivla-7b-jetson-int4}"; HF_REV="${OMNIVLA_HF_REVISION:-bd51d775e220495625e43f312bfe5fd85395e371}"
+CAST_REPO=jayden1711/omnivla-7b-cast-jetson-int4; CAST_REV=2c15a98a5f09e5efe823da7d474c28d22426ee2c; WNAME=weights; CAST=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --root) ROOT="$2"; shift 2;; --venv) VENV="$2"; shift 2;; --repo) REPO="$2"; shift 2;;
     --weights-src) WSRC="$2"; shift 2;; --no-system) MODE=no; shift;; --yes) MODE=yes; RT=yes; shift;;
     --yes-runtime) RT=yes; shift;;
     --hf-repo) HF_REPO="$2"; shift 2;; --hf-revision) HF_REV="$2"; shift 2;;
-    -h|--help) sed -n 2,14p "$0"; exit 0;;
+    --cast) CAST=1; shift;;
+    -h|--help) sed -n 2,17p "$0"; exit 0;;
     *) echo "unknown option $1"; exit 2;;
   esac
 done
 VENV="${VENV:-$DEPLOY/venv}"; REPO="${REPO:-$ROOT/OmniVLA}"; SRC="$ROOT/src"
+if [ "$CAST" = 1 ]; then          # an explicit --hf-repo / --hf-revision still wins
+  WNAME=weights_cast; [ -z "${OMNIVLA_HF_REPO:-}" ] && HF_REPO=$CAST_REPO; [ -z "${OMNIVLA_HF_REVISION:-}" ] && HF_REV=$CAST_REV
+fi
 OMNIVLA_COMMIT=5182600cb4a9ee07684e17cdd2a6cbafc56b8a68
 TF_FORK="transformers @ git+https://github.com/moojink/transformers-openvla-oft.git@bc339d9ad707454c0c115970db43c260067c61ab"
 MARLIN_COMMIT=1f25790
@@ -136,22 +143,22 @@ else git -C "$REPO" apply "$DEPLOY/patches/omnivla.patch" && ok "patch applied" 
 
 # ---------- 5. weights ----------
 verify_weights() { [ -f "$1/SHA256SUMS" ] && (cd "$1" && sha256sum -c --quiet SHA256SUMS >/dev/null 2>&1); }
-if verify_weights "$DEPLOY/weights"; then ok "weights/ verified ($(wc -l < "$DEPLOY/weights/SHA256SUMS") files)"
+if verify_weights "$DEPLOY/$WNAME"; then ok "$WNAME/ verified ($(wc -l < "$DEPLOY/$WNAME/SHA256SUMS") files)"
 else
   if [ -n "$WSRC" ]; then
     say "copying weights from $WSRC"
-    rm -rf "$DEPLOY/weights.incoming"; rsync -a "${WSRC%/}/" "$DEPLOY/weights.incoming/" || die "copy"
-    verify_weights "$DEPLOY/weights.incoming" || die "copied weights fail SHA256SUMS"
+    rm -rf "$DEPLOY/$WNAME.incoming"; rsync -a "${WSRC%/}/" "$DEPLOY/$WNAME.incoming/" || die "copy"
+    verify_weights "$DEPLOY/$WNAME.incoming" || die "copied weights fail SHA256SUMS"
     HOW="copied"
   else
     say "downloading weights from https://huggingface.co/$HF_REPO (revision $HF_REV, 4.1 GB)"
-    "$PY" "$DEPLOY/tools/download_weights.py" "$HF_REPO" "$HF_REV" "$DEPLOY/weights.incoming" \
-      || die "weights/ missing: download from Hugging Face failed (see above); or pass --weights-src DIR"
-    verify_weights "$DEPLOY/weights.incoming" || { rm -rf "$DEPLOY/weights.incoming"; die "downloaded weights fail SHA256SUMS"; }
+    "$PY" "$DEPLOY/tools/download_weights.py" "$HF_REPO" "$HF_REV" "$DEPLOY/$WNAME.incoming" \
+      || die "$WNAME/ missing: download from Hugging Face failed (see above); or pass --weights-src DIR"
+    verify_weights "$DEPLOY/$WNAME.incoming" || { rm -rf "$DEPLOY/$WNAME.incoming"; die "downloaded weights fail SHA256SUMS"; }
     HOW="downloaded"
   fi
-  [ -e "$DEPLOY/weights" ] && mv "$DEPLOY/weights" "$DEPLOY/weights.old.$(date +%s)"
-  mv "$DEPLOY/weights.incoming" "$DEPLOY/weights"; ok "weights/ $HOW and verified"
+  [ -e "$DEPLOY/$WNAME" ] && mv "$DEPLOY/$WNAME" "$DEPLOY/$WNAME.old.$(date +%s)"
+  mv "$DEPLOY/$WNAME.incoming" "$DEPLOY/$WNAME"; ok "$WNAME/ $HOW and verified"
 fi
 
 # ---------- 6. runtime + correctness check ----------
@@ -165,7 +172,7 @@ fi
 [ "$AVAIL" -ge 5700 ] && ok "$AVAIL MB available" || say "WARNING: $AVAIL MB available; the 7B model may not fit (reboot headless?)"
 sudo -n /usr/bin/jetson_clocks --show 2>/dev/null | grep -q "MaxFreq" && ok "jetson_clocks available (launch.sh sets max clocks for every run)"
 if ask_rt "run the correctness check now (launch.sh sets max clocks with jetson_clocks until reboot and runs the page-cache helper while the model runs)"; then
-  if OMNIVLA_VENV="$VENV" OMNIVLA_REPO="$REPO" "$DEPLOY/launch.sh" "$DEPLOY/tools/reference_check.py"; then CHECK=PASS; else CHECK=FAIL; FAILED=1; fi
+  if OMNIVLA_WEIGHTS="$WNAME" OMNIVLA_VENV="$VENV" OMNIVLA_REPO="$REPO" "$DEPLOY/launch.sh" "$DEPLOY/tools/reference_check.py"; then CHECK=PASS; else CHECK=FAIL; FAILED=1; fi
 else CHECK="NOT RUN"; FAILED=1; fi
 echo; say "================ SUMMARY ================"
 say "correctness check: $CHECK"

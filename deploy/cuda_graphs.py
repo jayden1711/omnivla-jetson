@@ -1,7 +1,7 @@
 """CUDA graphs for the fixed-shape parts of one OmniVLA prediction (OmniVLADeploy(..., cuda_graphs=True), the default).
 
 What is captured: the two vision encoders (input always 1x3x224x224) and the stack of 32 LLM decoder layers as one graph
-per token count (pose goal, image goal and each language prompt length get their own; at most 8). One graph for the whole
+per token count (pose goal, image goal and a language prompt length each get their own; at most 3, see install()). One graph for the whole
 stack keeps a single input/output buffer per token count: per-layer graphs held 32 of each and ran out of memory on the
 8 GB Orin (2026-09-28). Consequence: the per-layer hidden states the LLM returns with output_hidden_states=True are not
 meaningful (layers 1-31 pass their input through); the runtime only reads the last one, which is correct. What is not: token selection
@@ -83,8 +83,13 @@ def _clone(o):
     return o
 
 
-def install(vla, log=print):
-    """wrap the vision encoders and the LLM decoder layers of an OmniVLA model (after the runtime's own patches)"""
+def install(vla, log=print, max_llm_graphs=3, capture_after=2):
+    """wrap the vision encoders and the LLM decoder layers of an OmniVLA model (after the runtime's own patches).
+    LLM graphs: one per token count, captured the `capture_after`-th time that count occurs (the ROS node repeats the same
+    goal every frame), at most `max_llm_graphs` (pose goal, image goal and one language instruction); other token counts
+    run eagerly (bit-identical, ~5% slower). Each LLM graph holds ~40 MB of GPU pool and costs 65-120 MB of RAM, and a
+    capture makes that call ~1.5 s: an unbounded cache ran the 8 GB Orin out of memory after ~6 different CAST
+    instructions (2026-09-29)."""
     pools = {}                                                  # one pool per (device, purpose): shared by graphs that
     def pool(key):                                              # run one after the other on the same stream
         return lambda dev: pools.setdefault((str(dev), key), torch.cuda.graph_pool_handle())
@@ -99,14 +104,22 @@ def install(vla, log=print):
         for f in orig:
             hidden_states = f(hidden_states, *a, **kw)[0]
         return hidden_states
-    graphs = {}
+    graphs, seen, warned = {}, {}, []
 
     def first(hidden_states, *a, **kw):                        # layer 0 runs the whole stack as one graph
         cache = kw.pop("past_key_value", None); use_cache = kw.pop("use_cache", False)
         kw["past_key_value"] = None; kw["use_cache"] = False
         T = hidden_states.shape[1]
-        g = graphs.get(T) or graphs.setdefault(T, _Graphs(stack, pool(("llm", T)), "llm"))
-        h = g(hidden_states, *a, **kw)
+        g = graphs.get(T)
+        if g is None:
+            seen[T] = seen.get(T, 0) + 1
+            if seen[T] >= capture_after and len(graphs) < max_llm_graphs:
+                g = graphs[T] = _Graphs(stack, pool(("llm", T)), "llm")
+            elif len(graphs) >= max_llm_graphs and not warned:
+                warned.append(T)
+                log(f"[GRAPHS] {max_llm_graphs} LLM graphs in use (token counts {sorted(graphs)}): other token counts "
+                    "run without CUDA graphs", flush=True)
+        h = g(hidden_states, *a, **kw) if g is not None else stack(hidden_states, *a, **kw)
         return (h, cache) if use_cache else (h,)
 
     def passthrough(hidden_states, *a, **kw):                  # layers 1..31: already applied by layer 0's graph
@@ -115,4 +128,4 @@ def install(vla, log=print):
     for layer in layers[1:]:
         layer.forward = passthrough
     log(f"[GRAPHS] CUDA graphs installed: 2 vision encoders, {len(layers)} LLM layers as one stack "
-        "(captured on first use per input shape)", flush=True)
+        f"(vision: first use; LLM: {capture_after}nd use of a token count, at most {max_llm_graphs})", flush=True)

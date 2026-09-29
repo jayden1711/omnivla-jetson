@@ -3,11 +3,15 @@
 `deploy/` runs the validated deployment config (file paths in this document are relative to `deploy/`):
 
 - **LLM:** int4 per-channel on the Marlin kernel, GPTQ-calibrated weights. `OMNIVLA_WEIGHTS=<folder>` selects another weights folder inside `deploy/`.
-- **Vision:** HQQ 4-bit on the GemLite kernel.
+- **Vision:** GPTQ int4 per-channel on the Marlin kernel (default since 2026-09-29, `weights/vis_marpc`). SigLIP's
+  shapes are not Marlin-sized (k % 128, n % 256), so its 108 linears are zero-padded (exact: padded weights are 0 and
+  padded outputs are dropped). About 103 ms faster per encoded image than the previous HQQ 4-bit on GemLite, with no
+  significant accuracy change ([results/vismarlin_summary.md](../results/vismarlin_summary.md)). `OMNIVLA_VISION=hqq4`
+  (or weights without `vis_marpc`) uses HQQ 4-bit on GemLite as before.
 - **Tokens:** modality elision, then uniform-grid pruning of 75% of the current-image tokens in pose and image-goal
   modes. Language modes (7, 8) are not pruned: pruning cut object-goal accuracy from 84% to 69%
-  ([results/lelan_summary.md](../results/lelan_summary.md)). Their latency is therefore higher: 650-735 ms on the
-  Jetson with CUDA graphs (700-770 ms without; it differs between boots).
+  ([results/lelan_summary.md](../results/lelan_summary.md)). Their latency is therefore higher: 549-564 ms on the
+  Jetson (650-735 ms with HQQ4 vision; it differed between boots).
   `OmniVLADeploy(..., lang_prune_frac=0.5)` trades some accuracy for speed (81% on the same test, not significantly below 84%).
 - **Image goal:** the goal image's vision features are computed once per goal (exact). Reusing the goal tokens' keys/values
   as well is **off by default** (`goal_refresh=1`): OmniVLA's attention is bidirectional, so those keys/values depend on the
@@ -17,7 +21,14 @@
 - **CUDA graphs** (default, `cuda_graphs=True`): the two vision encoders and the 32-layer LLM stack are captured once
   per input shape and replayed; outputs are bit-identical, pose goals 7-10% faster, image goals 3-5%, language 5-6%
   (`deploy/cuda_graphs.py`, `tools/graph_check.py`). Capturing adds ~4.6 s to the warm-up. They are turned off
-  automatically with `goal_refresh > 1`. `cuda_graphs=False` restores the previous path.
+  automatically with `goal_refresh > 1`. `cuda_graphs=False` restores the previous path. The LLM gets at most 3 graphs
+  (pose goal, image goal, one language instruction), each captured the second time its token count occurs; other
+  prompt lengths run without graphs (same outputs, ~5% slower). Before this cap, varied instructions ran the Orin out
+  of memory.
+- **CAST instructions:** `OMNIVLA_WEIGHTS=weights_cast` runs the authors' omnivla-finetuned-cast checkpoint as GPTQ int4
+  (LLM and vision on Marlin), for behavioral instructions ("follow the dirt path"). Build it with
+  `tools/fetch_ckpt_subset.py` + `tools/build_cast_weights.py` from the `LANG_TEST=castgptq` Kaggle export
+  ([results/cast_gptq_summary.md](../results/cast_gptq_summary.md)). Language mode: 562 ms median on the Jetson.
 - **No key/value cache** (default, `llm_kv_cache=False`): the LLM does not build the cache that the runtime never reads.
   Outputs are bit-identical; without CUDA graphs it frees 283 MB of RAM.
 
@@ -27,11 +38,14 @@ Measured on the Jetson (100 in-distribution FrodoBots frames, single predictions
 
 | | Deployed config (GPTQ) | NF4 baseline |
 |---|---|---|
-| Latency, pose goal | 375-395 ms with CUDA graphs (default; differs between boots), 424 ms without | 1416 ms |
-| Latency, image goal | 980-1012 ms with CUDA graphs, 1056 ms without; 863 ms while the goal stays fixed (444 ms with opt-in K/V reuse; no CUDA graphs then) | 2146 ms |
-| RAM headroom (of 7620 MB) | 930-1030 MB with CUDA graphs (all modes in one process); first validation without: 1055 MB pose / 851 MB image | 827 / 575 MB |
-| Fidelity to bf16 (lower = closer) | 0.48 (round-to-nearest weights: 1.09) | 0.30 |
-| Driving error vs NF4 (image-goal test) | -0.003 action units, 95% CI [-0.09, +0.08], p = 0.76 | |
+| Latency, pose goal | 271 ms (HQQ4 vision: 375-395 ms) | 1416 ms |
+| Latency, image goal | 775 ms; 711 ms while the goal stays fixed (HQQ4 vision: 980-1012 / 863 ms) | 2146 ms |
+| RAM headroom (of 7620 MB) | 1334-1348 MB in the validation runs (one mode per process; HQQ4 vision in the same boot: 1269-1274 MB); all modes in one process, HQQ4 vision: 930-1030 MB | 827 / 575 MB |
+| Fidelity to bf16 (lower = closer) | 0.54 (HQQ4 vision 0.48; round-to-nearest LLM weights 1.09) | 0.30 |
+| Driving error vs NF4 (image-goal test) | 1.301 vs 1.317, p = 0.41 (HQQ4 vision: 1.314, p = 0.76) | |
+
+Latency and memory with Marlin vision were measured on one boot (2026-09-29, CUDA graphs on; latency differed by up to
+~10% between boots before). The 10-minute soak with Marlin vision: flat 271 ms, worst call 303 ms, 74 C at most.
 
 30-minute soaks (details in `deploy/SOAK.md`; pose mode 2026-09-26, image goal 2026-09-27) showed:
 - **No slowdown and no throttling:** latency drift below 0.5 ms per 10 minutes; junction temperature at most 74 C; about 21-23 W.
@@ -45,7 +59,10 @@ With GPTQ weights its outputs are close to NF4's distance from bf16 (fidelity 0.
 deploy/
   launch.sh                 run anything with the settings the 8 GB Orin needs (clocks, allocator, page-cache drop)
   omnivla_deploy.py         the runtime: OmniVLADeploy(dir).predict(image, mode, goal_pose|goal_image|lang)
-  weights/                  pre-packed weights, GPTQ LLM (3.4 GB Marlin/HQQ shards + 0.4 GB base.safetensors + model/), SHA256SUMS
+  weights/                  pre-packed weights, GPTQ LLM (3.4 GB Marlin/HQQ shards + 0.4 GB base.safetensors + model/), vis_marpc/
+                            (0.37 GB GPTQ Marlin vision, added by tools/add_vision_marlin.py), SHA256SUMS
+  weights_cast/             optional: omnivla-finetuned-cast for CAST-style instructions (tools/build_cast_weights.py;
+                            OMNIVLA_WEIGHTS=weights_cast)
   constraints.txt           torch 2.8.0 / torchvision 0.23.0 / numpy 1.26.4 (Jetson builds - never replace)
   requirements-deploy.txt   every other Python package, pinned
   patches/omnivla.patch     one-line import fix for the OmniVLA repo
@@ -245,6 +262,7 @@ Offline test (no rover; DDS stays on localhost; the bridge sends to 127.0.0.1): 
 - **Always `.detach()` when copying saved tensors to the GPU.** Saved biases are Parameters; a non-detached copy keeps the CPU tensor, and with it the file, alive.
 - **The loader calls `malloc_trim(0)` after each shard.** Without it, glibc keeps about 0.5 GB of freed buffers.
 - **Quantizing on the Jetson itself (HQQ) peaks too high and leaves about 0.4 GB of buffers behind.** Always quantize offline.
-- **GemLite needs layer widths divisible by 32.** SigLIP's MLP (4304) therefore stays on HQQ's portable kernel. Keeping it in fp16 saves 0.12 s but leaves only about 0.4 GB of headroom in image mode, and it ran out of memory once.
+- **GemLite needs layer widths divisible by 32.** With HQQ4 vision, SigLIP's MLP (4304) therefore stays on HQQ's portable kernel (99 ms per image). Keeping it in fp16 saves 0.12 s but leaves only about 0.4 GB of headroom in image mode, and it ran out of memory once. Marlin vision (the default) avoids both by zero-padding to Marlin's sizes.
+- **GPTQ zeroes dead input columns before it sets a channel's scale.** An export must use the scale GPTQ used (`gptq(..., ret_scale=True)`), not one recomputed from the original weights: the first vision export failed its grid check on SigLIP rows whose largest weight sat in a never-active input.
 - **`tegrastats --logfile` appends.** Delete the log before measuring.
 - **One 7B process at a time.** Loading two models, or switching goal modes over and over in one long-lived process, has run out of memory.

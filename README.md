@@ -1,16 +1,27 @@
 # OmniVLA on a Jetson Orin Nano 8 GB
 
 This repo runs OmniVLA, a 7B vision-language-action model for robot navigation, on a Jetson Orin Nano 8 GB. The LLM is
-quantized to int4 with GPTQ and runs on the Marlin kernel. The vision encoders use HQQ 4-bit on GemLite. Unused goal
+quantized to int4 with GPTQ and runs on the Marlin kernel; so do the two vision encoders. Unused goal
 tokens are dropped and 75% of the camera image tokens are pruned. A ROS 2 node drives a small rover from the model's output.
 
 ![Image-goal predictions on FrodoBots-2K clips](docs/media/demo.gif)
 
 Image-goal predictions of the deployed int4 weights on three FrodoBots-2K clips that are not in any test set, one per
-1.05 s (the image-goal latency on the Jetson). The predictions were computed on a GPU with the same weights (they match
+1.05 s (the image-goal latency on the Jetson when it was rendered). The predictions were computed on a GPU with the same weights (they match
 the Jetson to about 0.003 action units). Blue: predicted path. White: the path the human driver took. Open loop: the
 model did not drive. Video: FrodoBots-2K by FrodoBots Lab, CC BY-SA 4.0; the GIF and
 [docs/media/demo.mp4](docs/media/demo.mp4) are CC BY-SA 4.0 too.
+
+![OmniVLA-7B int4 on a Jetson Orin Nano, open loop on online walking footage](docs/media/demo_online.gif)
+
+The deployed runtime on the Jetson itself, replaying three walking clips from Wikimedia Commons as a live camera: every
+prediction takes the frame the video has reached when the previous one finished, so the rate on screen is the real one
+(567-571 ms per prediction in language mode, 718 ms with an image goal). Language instructions name objects in view
+("move toward the red fence"); one segment uses an image goal. Open loop: nothing is being driven, and there is no ground
+truth for this footage, so it shows behavior and speed, not accuracy. Path: top view in the model's action units.
+Video: Acabashi (CC BY-SA 4.0), Laura Vaara (CC BY 3.0), Pittigrilli (CC0), via Wikimedia Commons; the GIF and
+[docs/media/demo_online.mp4](docs/media/demo_online.mp4) are CC BY-SA 4.0 (credits in the video and in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)).
 
 ## Results
 
@@ -19,17 +30,40 @@ Jetson Orin Nano 8 GB (MAXN SUPER), 100 FrodoBots frames, image-goal driving tes
 
 | | This repo | bitsandbytes NF4 | bf16 (cloud GPU) |
 |---|---|---|---|
-| Latency, pose goal | 375-395 ms (424 ms without CUDA graphs) | 1416 ms | - |
-| Latency, image goal | 980-1012 ms (1056 ms without CUDA graphs, 863 ms without them when the goal is unchanged) | 2146 ms | - |
-| RAM headroom | 930-1030 MB, all modes in one process (the first validation, without CUDA graphs: 1055 pose / 851 MB image) | 827 / 575 MB | does not fit |
-| Distance from bf16 actions | 0.48 | 0.30 | 0 |
-| Driving error vs the human's path | 1.314 | 1.317 | 1.330 |
+| Latency, pose goal | 271 ms | 1416 ms | - |
+| Latency, image goal | 775 ms (711 ms when the goal is unchanged) | 2146 ms | - |
+| RAM headroom | 1334-1348 MB in the validation runs (one mode per process) | 827 / 575 MB | does not fit |
+| Distance from bf16 actions | 0.54 | 0.30 | 0 |
+| Driving error vs the human's path | 1.301 | 1.317 | 1.330 |
 
-CUDA graphs (on by default) give bit-identical outputs, so the accuracy numbers hold with and without them. Latency
-ranges: the same code measured on different boots of the same Jetson. The driving
-error of this repo's config is not significantly different from NF4 (p = 0.76) or bf16 (p = 0.40). Details:
-[results/gptq_validation.md](results/gptq_validation.md), [results/final_validation.md](results/final_validation.md),
-[results/](results/).
+Measured on one boot (latency differed by up to ~10% between boots before). The vision encoders moved from HQQ 4-bit
+on GemLite to GPTQ int4 on Marlin on 2026-09-29: about 103 ms faster per encoded image, no significant accuracy change
+(image goal 1.301 vs 1.314, p = 0.33; object goal 82% vs 84%, p = 0.22;
+[results/vismarlin_summary.md](results/vismarlin_summary.md)). With HQQ4 vision (`OMNIVLA_VISION=hqq4`) the numbers
+were 375-395 ms pose, 980-1012 ms image goal, 930-1030 MB headroom with all modes in one process, distance from bf16
+0.48, driving error 1.314. CUDA graphs (on by default) give bit-identical outputs. The driving error of this repo's
+config is not significantly different from NF4 (p = 0.41) or bf16 (p = 0.17). Details:
+[results/vismarlin_summary.md](results/vismarlin_summary.md), [results/gptq_validation.md](results/gptq_validation.md),
+[results/final_validation.md](results/final_validation.md), [results/](results/).
+
+### Original OmniVLA-7B vs this repo
+
+| | Original 7B (bf16) | This repo (int4, on the Jetson) | OmniVLA-edge |
+|---|---|---|---|
+| Image goal, driving error | 1.330 | 1.301 (vs original: no significant difference, p = 0.17) | 1.490 |
+| Object goal, picks the named object | 84% | 82% (vs original: no significant difference, p = 0.22) | 70% |
+| Weights | 15.1 GB: does not fit the Orin Nano (7.6 GB in total) | 4.13 GiB, 1.3 GB RAM left | 0.43 GB |
+| Latency on the Jetson, pose / image / language | - (does not fit) | 271 / 775 / 549-564 ms | 113 ms |
+
+Accuracy: single open-loop predictions on in-distribution test frames; the image-goal test is the one where blind
+controls show the model uses the camera. The 5 s pose-goal test is left out here: it does not pass that perception
+check, so differences on it are not meaningful (numbers in the details file).
+
+Context on different hardware, not a speed comparison: OmniVLA's own inference path in fp16 takes 511 / 520 / 537 ms
+(pose / image / language) on a Kaggle machine with two Tesla T4 GPUs (the model does not fit on one, so it is split
+across both). The OmniVLA paper ran the 7B model on a desktop RTX 4090 that controlled the robot over the internet
+(action chunks at 3 Hz) and does not report a latency. Details and sources:
+[results/benchmark_original_vs_ours.md](results/benchmark_original_vs_ours.md).
 
 ### 7B or OmniVLA-edge?
 
@@ -42,10 +76,11 @@ OmniVLA also comes as OmniVLA-edge, a small model with the same goal types. Same
 | Pose goal 20 s, driving error | 1.515 | 1.586 (not clearly different: p = 0.03, but the CI includes 0) |
 | Object goal ("move toward <object>"), picks the named object | **84%** (language modes run without token pruning) | 70% (7B better, p = 1e-6) |
 | Behavioral instructions (CAST), driving error | 2.231 | 2.188 (no significant difference; neither model trained on them) |
-| Latency on the Jetson | 375-395 ms pose, 980-1012 ms image goal, 650-735 ms language | 113 ms (MAXN SUPER), 132-152 ms (25W) |
-| Memory on the Jetson | 4.14 GiB weights, 0.93-1.03 GB RAM left | 1.10 GB peak GPU memory |
+| Latency on the Jetson | 271 ms pose, 775 ms image goal, 549-564 ms language | 113 ms (MAXN SUPER), 132-152 ms (25W) |
+| Memory on the Jetson | 4.13 GiB weights, 1.33-1.35 GB RAM left (one mode per process) | 1.10 GB peak GPU memory |
 
-Image goal and 5 s pose goal: the deployed runtime's outputs on the Jetson. 20 s pose goal and language: the same int4
+The accuracy rows were measured with the previous HQQ4 vision; Marlin vision did not change image-goal (1.301 vs
+1.314) or object-goal accuracy (82% vs 84%) significantly. Image goal and 5 s pose goal: the deployed runtime's outputs on the Jetson. 20 s pose goal and language: the same int4
 weights on a Kaggle T4 (fp16 kernels; they match the Jetson to 0.003 action units where both exist). OmniVLA-edge:
 accuracy off the Jetson with its 5 past frames; its latency and memory were measured earlier with OmniVLA's own
 `run_omnivla_edge.py`, not with this repo ([results/edge_jetson.md](results/edge_jetson.md)).
@@ -53,7 +88,7 @@ accuracy off the Jetson with its 5 past frames; its latency and memory were meas
 **Recommendation:** use the 7B model for image goals where accuracy matters: it is about 12% more accurate there
 (p = 0.01), and the image-goal test is the only one where blind controls show the model really uses the camera. It is
 also clearly better at object-goal language prompts (84% vs 70%). Use OmniVLA-edge when latency or memory matter more:
-it is about 3.5-9x faster (113 ms vs 375-1012 ms) and leaves most of the 8 GB free.
+it is about 2.4-7x faster (113 ms vs 271-775 ms) and leaves most of the 8 GB free.
 
 - With a pose goal the 7B is better at 5 s and not clearly better at 20 s, but the pose tests are weaker checks of
   perception: a shuffled camera image does not make the 7B model clearly worse on them.
@@ -93,8 +128,8 @@ deployed config (69%) was clearly below full precision; the ablation above, on t
 (84%, p = 1); 50% pruning costs 3 points (not significant); 75% pruning costs about the same with or without
 quantization. So the runtime and the Python API now skip pruning in language modes (7, 8), and keep 75% for pose and
 image goals, where it did not change driving error. The price is latency and memory: on the Jetson a language
-prediction takes 650-735 ms with CUDA graphs (700-770 ms without; it differs between boots; pose goal: 375-395 ms),
-with 930-1030 MB of RAM left with all modes in use. `lang_prune_frac=0.5` is a middle ground: 81%, and 538 ms
+prediction takes 549-564 ms (pose goal: 271 ms; with HQQ4 vision 650-735 ms, which differed between boots), with
+930-1030 MB of RAM left with all modes in use (measured with HQQ4 vision; Marlin vision peaks ~70 MB lower). `lang_prune_frac=0.5` is a middle ground: 81%, and 538 ms
 without CUDA graphs ([results/jetson_validation_2026-09-28.md](results/jetson_validation_2026-09-28.md)).
 
 Pruning by relevance to the instruction does not help: keeping the image patches most similar to the object phrase (SigLIP
@@ -142,19 +177,36 @@ Not tested on hardware yet:
 - To build the weights: a Kaggle account with GPU access, the `kaggle` CLI, ffmpeg and the packages in
   `eval/requirements-eval.txt` (the dataset step downloads a few GB of FrodoBots-2K). Not needed if you use the pre-built
   weights on Hugging Face: [huggingface.co/jayden1711/omnivla-7b-jetson-int4](https://huggingface.co/jayden1711/omnivla-7b-jetson-int4).
-- ffmpeg on the Jetson for the one-time reference-image download (or copy the images from a PC).
+- ffmpeg on the Jetson, installed before running `setup_jetson.sh` (`sudo apt install ffmpeg`), so the correctness
+  check can download its 10 reference frames and goal images from FrodoBots-2K automatically. Without it, copy them
+  from a PC into `deploy/tests/reference/frames/` and `goals/` (see `deploy/tests/reference/README.md`).
 - OmniVLA itself is not included. The setup script clones it at commit `5182600` and applies a one-line patch.
 
 ## Setup
 
 Skip the first two commands if you use the pre-built weights: without `--weights-src`, `setup_jetson.sh` downloads
-them from Hugging Face (`--hf-repo` / `--hf-revision` to override) and checks `SHA256SUMS`.
+them from Hugging Face (`--hf-repo` / `--hf-revision` to override) and checks `SHA256SUMS`. The download (4.1 GB per
+weights set) takes most of the setup time, so the total depends on your network: on the test Jetson the whole README
+workflow took 15 minutes for the default weights at about 6.3 MB/s, where the download was 11 minutes; at the 0.8 MB/s
+measured on the same Jetson another time, each download would take about 85 minutes. The rest (venv with the Jetson
+torch wheel and a Marlin build, OmniVLA clone, correctness check) took about 4 minutes
+([results/readme_rerun_2026-09-29.md](results/readme_rerun_2026-09-29.md)). Weights without the Marlin
+vision layers (`vis_marpc/`) run with HQQ4 vision, about 103 ms slower per encoded image, and the setup check then uses
+the HQQ4 references. To add them to your own build: `KAGGLE_USER=<you> LANG_TEST=visgptqx eval/kaggle/lang_eval.sh`
+(~0.2 GPU-hour), then on the Jetson `CUDA_VISIBLE_DEVICES= python tools/add_vision_marlin.py prequant_vis_gptq.pt
+prequant_vis_gptq_manifest.json weights`.
 
 ```
 KAGGLE_USER=<you> ./build/make_build_dataset.sh             # on a PC, once: your private Kaggle dataset (no GPU)
 KAGGLE_USER=<you> ./build/build_model.sh build/out          # on a PC: builds the weights on a free Kaggle T4 (~0.4 GPU-h)
 ./deploy/setup_jetson.sh --weights-src <copy of build/out/weights>   # on the Jetson
 ```
+
+For CAST-style instructions ("follow the dirt path, making a gentle left turn"), `./deploy/setup_jetson.sh --cast`
+installs the authors' CAST-fine-tuned checkpoint as int4
+([jayden1711/omnivla-7b-cast-jetson-int4](https://huggingface.co/jayden1711/omnivla-7b-cast-jetson-int4)) into
+`deploy/weights_cast/` next to the default weights; run it with `OMNIVLA_WEIGHTS=weights_cast deploy/launch.sh`. It is
+not better outside language mode ([results/cross_mode_summary.md](results/cross_mode_summary.md)).
 
 Both build scripts take `--dry-run`. `python build/verify_build.py build/out/weights` compares a build with the validated
 weights tensor by tensor. `setup_jetson.sh` asks before every system change (power mode, headless boot, swap, sudoers entries), builds the venv
@@ -214,7 +266,7 @@ Tests that run anywhere (also in CI): `python -m unittest discover -s tests`, `d
   check.
 - Language modes run without image-token pruning to keep object-goal accuracy at the full-precision level (84% vs 69%
   with pruning, [results/lelan_summary.md](results/lelan_summary.md)). They are therefore slower than pose goals
-  (650-735 ms with CUDA graphs).
+  (549-564 ms vs 271 ms).
 - Process memory grows by 50-65 MB per 10 minutes; restart the node every ~2 hours. Latency differs by up to ~10%
   between boots of the same Jetson (most in language mode), for an unknown reason; compare configurations within one boot.
 - Grouped Marlin (groupsize 128) gives wrong results on sm_87; only per-channel weights are used
@@ -243,5 +295,5 @@ Changes between versions: [CHANGELOG.md](CHANGELOG.md).
 ## License
 
 The code in this repo is MIT ([LICENSE](LICENSE)). OmniVLA is MIT. The model weights are derived from Llama 2 and
-fall under the Llama 2 Community License. The FrodoBots-2K data is CC BY-SA 4.0, and so are the demo GIF and video in
-`docs/media/`. See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
+fall under the Llama 2 Community License. The FrodoBots-2K data is CC BY-SA 4.0, and so are the demo GIFs and videos in
+`docs/media/` (the online-footage demo also contains CC BY 3.0 and CC0 video from Wikimedia Commons). See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

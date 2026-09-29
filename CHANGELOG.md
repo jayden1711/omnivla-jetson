@@ -3,6 +3,32 @@
 ## 0.2.0 (unreleased)
 
 ### Added
+- Vision encoders on Marlin (default): GPTQ per-channel int4 for all 204 vision linears, SigLIP zero-padded to Marlin's
+  shapes (`weights/vis_marpc`, `deploy/tools/add_vision_marlin.py`, `eval/jetson/vis_marlin_gate.py`). On the Jetson:
+  pose 374 -> 271 ms, image goal 981 -> 775 ms, language 663-672 -> 549-564 ms (same boot), ~70 MB less RAM; accuracy
+  unchanged (image goal 1.301 vs 1.314, p = 0.33; object goal 82% vs 84%, p = 0.22; `results/vismarlin_summary.md`).
+  RTN per-channel failed the object-goal rule (-5 points, p = 0.007). `OMNIVLA_VISION=hqq4` keeps the previous path;
+  `tools/reference_check.py` and `tools/api_check.py` use `tests/reference/reference_hqq4.npz` for it. Latency profile
+  and the options that were not worth doing (GPU preprocessing, faster attention): `results/latency_options.md`.
+- omnivla-finetuned-cast (the authors' CAST checkpoint) as GPTQ int4, language mode, no pruning: calibrated and
+  evaluated on CAST episodes split by recording (`eval/data/cast_split.py`, `eval/analysis/cast_gptq_analysis.py`,
+  `results/cast_gptq_summary.md`); weights folder for the Jetson: `deploy/tools/build_cast_weights.py` (with
+  `deploy/tools/fetch_ckpt_subset.py`, which downloads only the non-quantized tensors); `OMNIVLA_WEIGHTS=weights_cast`.
+  The runtime reads the heads' checkpoint step from the weights folder.
+
+- CAST vs original outside language mode, both as the deployed int4 runtime on the Jetson with the same controls
+  (`eval/jetson/cross_mode_eval.py`, `eval/analysis/cross_mode_analysis.py`, `results/cross_mode_summary.md`): no
+  significant difference on the image-goal and object-goal tests; on the 5 s pose test the CAST int4 model is worse
+  (+0.096, p = 0.002), but not in bf16 (-0.029, p = 0.25).
+- Original vs this repo vs OmniVLA-edge: accuracy, memory and latency in one table (`results/benchmark_original_vs_ours.md`,
+  README); the original 7B timed in fp16 on 2x T4 (`STUDY=t4lat`).
+- Demo on online footage (`docs/media/demo_online.{gif,mp4}`, CC BY-SA 4.0): the deployed runtime on the Jetson replays
+  three Wikimedia Commons walking clips as a live camera at its real rate (`eval/demo/online_frames.py`,
+  `eval/jetson/online_demo.py`, `eval/demo/render_online_demo.py`); the FrodoBots demo stays.
+- `setup_jetson.sh --cast` installs the CAST weights from Hugging Face
+  (`jayden1711/omnivla-7b-cast-jetson-int4` @ 2c15a98) into `weights_cast/`; `tests/reference/reference_cast.npz`.
+  The default weights' Hugging Face revision is now bd51d77 (adds `vis_marpc/`).
+
 - `omnivla_jetson` Python package: `OmniVLAJetson(weights_path).predict(image, goal_image=, goal_pose=, instruction=)`
   returns the waypoints and OmniVLA's velocity command. It wraps `deploy/omnivla_deploy.py` without changing it.
   `examples/` has one script per mode. `tests/test_api.py` replays the validated deployment's recorded outputs;
@@ -23,6 +49,12 @@
   image-goal prediction in every mode.
 - `docs/troubleshooting.md`, a safety section in the README, `CITATION.cff`, and a GitHub Actions workflow (syntax
   checks, API tests, rover protocol tests, mock test of `setup_jetson.sh`).
+
+### Fixed
+- CUDA graphs: one LLM graph was captured for every new prompt length, without a limit; varied language instructions
+  ran the 8 GB Orin out of memory after ~6 prompts (each capture ~1.5 s and 65-120 MB of RAM). A token count is now
+  captured on its second use, at most 3 LLM graphs (pose, image goal, one instruction); others run eagerly
+  (bit-identical, ~5% slower). Checked: 30/30 graph vs eager, 40/40 references, RAM flat over 176 different prompts.
 
 ### Changed
 - `deploy/omnivla_deploy.py`: image-token pruning is now mode-dependent. Pose and image-goal modes keep 75% (same code

@@ -1,7 +1,8 @@
 """OmniVLA-7B runtime for the Jetson Orin Nano 8 GB.
 
-LLM: per-channel int4 on Marlin (groupsize=-1; grouped Marlin is wrong on sm_87). Vision: HQQ 4-bit on GemLite, SigLIP
-MLP (width 4304) on HQQ's portable backend. Modality elision + uniform-grid pruning of 75% of the current-image tokens
+LLM and vision linears: GPTQ per-channel int4 on Marlin (groupsize=-1; grouped Marlin is wrong on sm_87); SigLIP shapes
+are zero-padded to Marlin's k % 128 / n % 256 (exact: padded weights are 0). Vision fallback (OMNIVLA_VISION=hqq4 or
+weights without vis_marpc): HQQ 4-bit on GemLite, SigLIP MLP (width 4304) on HQQ's portable backend. Modality elision + uniform-grid pruning of 75% of the current-image tokens
 in pose and image-goal modes (4, 6). Language modes (7, 8) run without pruning (lang_prune_frac=0): 75% pruning cut
 object-goal accuracy from 84% to 69% (results/lelan_summary.md), while pose and image goals are unaffected.
 Weights: pre-packed 256 MB shards from build/build_model.sh. Image-goal mode caches the goal's vision features (exact);
@@ -12,7 +13,7 @@ goal K/V reuse (goal_refresh > 1) is an approximation because OmniVLA's LLM atte
   v, w = OmniVLADeploy.actions_to_cmd(out["actions"])                         # m/s, rad/s (run_omnivla's controller)
 Modes: 4 pose, 6 image, 7 language, 8 language + pose. Run through launch.sh.
 """
-import ctypes, gc, hashlib, json, math, os, sys, time
+import ctypes, functools, gc, hashlib, json, math, os, sys, time
 
 import numpy as np
 import torch
@@ -22,13 +23,50 @@ N_IMG, CHUNK = 256, 8
 GOAL_REFRESH = 1          # 1 = no goal K/V reuse (reuse costs +0.02 driving error, results/refresh_summary.md)
 
 
+@functools.lru_cache(maxsize=None)
+def _vis_marlin_cls():                                        # built on first use: importing this module must not need
+    class VisMarlinPC(torch.nn.Module):
+        """Vision linear as per-channel int4 Marlin (groupsize=-1) with bias. Marlin needs k % 128 == 0 and n % 256 == 0: the
+        SigLIP shapes are zero-padded (tools/add_vision_marlin.py). Padded weight columns are exactly 0 and meet zero-padded
+        inputs; padded output rows are sliced off, so the real outputs only get exact zero products added."""
+
+        def __init__(self, st, dev):
+            super().__init__()
+            import marlin
+            self.k, self.n, self.kp, self.np_ = (int(st[x]) for x in ("k", "n", "kp", "np"))
+            self.L = marlin.Layer(self.kp, self.np_, groupsize=-1).to(dev)
+            with torch.no_grad():
+                self.L.B.copy_(st["marlin_B"]); self.L.s.copy_(st["marlin_s"])
+            self.bias = None if st.get("bias") is None else st["bias"].to(dev, torch.float16)
+            self.in_features, self.out_features = self.k, self.n
+
+        def forward(self, x):
+            sh = x.shape[:-1]
+            x = x.reshape(-1, self.k).to(torch.float16).contiguous()
+            if self.kp != self.k:
+                x = torch.nn.functional.pad(x, (0, self.kp - self.k))
+            y = self.L(x)
+            if self.np_ != self.n:
+                y = y[:, : self.n]
+            y = y + self.bias if self.bias is not None else y.contiguous()
+            return y.reshape(*sh, self.n)
+    return VisMarlinPC                                        # torch.nn (tests/test_api.py stubs torch)
+
+
+def __getattr__(name):                                        # omnivla_deploy.VisMarlinPC (eval/jetson/vis_marlin_gate.py)
+    if name == "VisMarlinPC":
+        return _vis_marlin_cls()
+    raise AttributeError(name)
+
+
 def _grid_keep(n):
     return np.unique(np.round(np.linspace(0, N_IMG - 1, n)).astype(int))
 
 
 class OmniVLADeploy:
     def __init__(self, deploy_dir, repo=DEFAULT_REPO, prune_frac=0.75, verbose=True, trim_every=20, goal_refresh=GOAL_REFRESH,
-                 vit_trunc=True, lang_prune_frac=0.0, cuda_graphs=True, llm_kv_cache=False):
+                 vit_trunc=True, lang_prune_frac=0.0, cuda_graphs=True, llm_kv_cache=False,
+                 vision_kernel=os.environ.get("OMNIVLA_VISION", "marlin")):
         t0 = time.time()
         self.dir, self.log = deploy_dir, (print if verbose else (lambda *a, **k: None))
         if repo not in sys.path:
@@ -87,10 +125,23 @@ class OmniVLADeploy:
             def forward(self, x):
                 return self.L(x.reshape(-1, self.k).half()).reshape(*x.shape[:-1], self.n)
 
-        idx = json.load(open(os.path.join(W, "SHARDS.json")))["marpc"]
-        names, libc, built, counts = set(idx["names"]), ctypes.CDLL("libc.so.6"), set(), {}
+        SH = json.load(open(os.path.join(W, "SHARDS.json"))); idx = SH["marpc"]
+        # vision_kernel: "marlin" (default since 2026-09-29: -103 ms per encoded image on the Orin, accuracy unchanged,
+        # results/vismarlin_summary.md) = GPTQ per-channel int4 Marlin (weights/vis_marpc); "hqq4" = HQQ 4-bit on GemLite +
+        # HQQ portable (in weights/marpc). Weights without vis_marpc fall back to hqq4.
+        assert vision_kernel in ("marlin", "hqq4"), vision_kernel
+        if vision_kernel == "hqq4" and "vis_marpc" in SH and not any(n.startswith("vision_backbone.") for n in idx["names"]):
+            vision_kernel = "marlin"                          # weights built without HQQ4 vision (e.g. weights_cast)
+        if vision_kernel == "marlin" and "vis_marpc" not in SH:
+            self.log("[DEPLOY] weights have no vis_marpc (Marlin vision): using HQQ4 vision", flush=True)
+            vision_kernel = "hqq4"
+        self.vision_kernel = vision_kernel
+        vis_m = set(SH["vis_marpc"]["names"]) if vision_kernel == "marlin" else set()
+        names, libc, built, counts = set(idx["names"]) - vis_m, ctypes.CDLL("libc.so.6"), set(), {}
         for s in idx["shards"]:
             part = torch.load(os.path.join(W, "marpc", s), weights_only=False)
+            for nm in [n for n in part if n in vis_m]:        # HQQ4 vision replaced by the Marlin layers below
+                del part[nm]
             for nm in sorted(part):
                 # .detach(): saved biases are Parameters; a non-detached copy's autograd node keeps the CPU tensor alive
                 st = {k: (v.detach().to(dev) if torch.is_tensor(v) else v) for k, v in part.pop(nm).items()}
@@ -102,7 +153,14 @@ class OmniVLADeploy:
                 parent = vla.get_submodule(nm.rsplit(".", 1)[0]); setattr(parent, nm.rsplit(".", 1)[1], ql)
                 built.add(nm); counts[b] = counts.get(b, 0) + 1
             del part; gc.collect(); torch.cuda.empty_cache(); libc.malloc_trim(0)   # glibc keeps freed buffers otherwise
-        assert built == names, f"missing quantized layers: {sorted(names - built)[:3]}"
+        for s in (SH["vis_marpc"]["shards"] if vis_m else []):
+            part = torch.load(os.path.join(W, "vis_marpc", s), weights_only=False)
+            for nm in sorted(part):
+                st = {k: (v.detach().to(dev) if torch.is_tensor(v) else v) for k, v in part.pop(nm).items()}
+                parent = vla.get_submodule(nm.rsplit(".", 1)[0]); setattr(parent, nm.rsplit(".", 1)[1], _vis_marlin_cls()(st, dev))
+                built.add(nm); counts["marlin_pc_vision"] = counts.get("marlin_pc_vision", 0) + 1
+            del part; gc.collect(); torch.cuda.empty_cache(); libc.malloc_trim(0)
+        assert built == names | vis_m, f"missing quantized layers: {sorted((names | vis_m) - built)[:3]}"
         st = None; gc.collect(); libc.malloc_trim(0)
 
         # 3) buffers: rotary inv_freq is created on meta by the empty skeleton -> recompute; others to GPU
@@ -134,6 +192,9 @@ class OmniVLADeploy:
 
         # 5) heads
         rc = R.InferenceConfig(); rc.vla_path = MD
+        steps = sorted(int(f.split("--")[1].split("_")[0]) for f in os.listdir(MD) if f.startswith("action_head--"))
+        assert len(steps) == 1, f"expected one action_head checkpoint in {MD}: {steps}"
+        rc.resume_step = self.head_step = steps[0]            # 120000 (omnivla-original), 210000 (omnivla-finetuned-cast)
         self.pose_projector = R.init_module(R.ProprioProjector, "pose_projector", rc, dev, {"llm_dim": vla.llm_dim, "proprio_dim": POSE_DIM}).eval()
         self.action_head = R.init_module(R.L1RegressionActionHead_idcat, "action_head", rc, dev,
                                          {"input_dim": vla.llm_dim, "hidden_dim": vla.llm_dim, "action_dim": ACTION_DIM}, to_bf16=True).to(self.DT).eval()
@@ -161,7 +222,7 @@ class OmniVLADeploy:
         # glibc retains freed per-frame buffers (~+118 MB / 10 min): trim every `trim_every` predictions (0 = never)
         self._libc, self._trim_every, self._n_pred = libc, int(trim_every), 0
         self.weights_gib = torch.cuda.memory_allocated() / 2**30
-        self.log(f"[DEPLOY] ready in {time.time()-t0:.0f} s | layers {counts} (GemLite {n_gl}) | "
+        self.log(f"[DEPLOY] ready in {time.time()-t0:.0f} s | vision {vision_kernel} | layers {counts} (GemLite {n_gl}) | "
                  f"torch {self.weights_gib:.2f} GiB | pruning grid {int(prune_frac*100)}% (keep {self.n_keep}), "
                  f"language modes {int(lang_prune_frac*100)}% (keep {self.n_keep_lang})", flush=True)
 

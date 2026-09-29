@@ -18,7 +18,6 @@ venv/
 .venv/
 venv_*/
 env/
-
 # Datasets, frames, derived data
 data_raw/
 data_frames/
@@ -36,7 +35,6 @@ deploy/tests/reference/goals/
 *.ts
 *.zip
 *.tar.gz
-
 # Logs and run outputs
 *.log
 *.out
@@ -46,14 +44,12 @@ results/mf_results/
 results/*.csv
 results/*.json
 mf_results/
-
 # Caches
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .pytest_cache/
 .DS_Store
-
 # Secrets and personal config
 .kaggle/
 kaggle.json
@@ -62,9 +58,9 @@ kaggle.json
 *.key
 .ssh/
 sudoers*
-
 # Backups
 *.bak
 *.bak[0-9]*
 *_old
 *.orig
+build/demo_online/

@@ -1,10 +1,11 @@
-# gptq_weight_check.py WEIGHTS_DIR PREQUANT_DIR - bit-exact check of the packed GPTQ Marlin layers against the export.
+# gptq_weight_check.py WEIGHTS_DIR PREQUANT_DIR [MANIFEST] - bit-exact check of the packed GPTQ Marlin layers against the export.
 # Marlin(I) returns W^T exactly, so its fp16 bytes must hash to the manifest's deq_sha256_WT_fp16 for all 224 LLM layers.
 import hashlib, json, sys
 import torch, marlin
 
 W, PQ = sys.argv[1], sys.argv[2]
-man = json.load(open(f"{PQ}/prequant_marpcg_manifest.json"))["deq_sha256_WT_fp16"]
+MAN = sys.argv[3] if len(sys.argv) > 3 else "prequant_marpcg_manifest.json"   # weights_cast: prequant_marpcg_cast_manifest.json
+man = json.load(open(f"{PQ}/{MAN}"))["deq_sha256_WT_fp16"]
 idx = json.load(open(f"{W}/SHARDS.json"))["marpc"]
 ok = bad = 0
 for s in idx["shards"]:
